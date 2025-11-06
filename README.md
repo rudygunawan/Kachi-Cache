@@ -229,7 +229,7 @@ TimeBasedRefreshPolicy<String, StockPrice> refreshPolicy =
     new TimeBasedRefreshPolicy<>(
         ZoneId.of("Asia/Singapore"),
         tradingHours,
-        30, TimeUnit.SECONDS  // After-hours: refresh every 30 seconds
+        120, TimeUnit.SECONDS  // After-hours: refresh every 30 seconds
     );
 
 LoadingCache<String, StockPrice> cache = CacheBuilder.newBuilder()
@@ -238,7 +238,7 @@ LoadingCache<String, StockPrice> cache = CacheBuilder.newBuilder()
 
 // Cache automatically refreshes:
 //   - Every 10 seconds during trading hours (9am-12pm, 1pm-5pm)
-//   - Every 30 seconds after hours
+//   - Every 2 minutes after hours
 //   - Old value served while new value loads (non-blocking)
 ```
 
