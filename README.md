@@ -636,6 +636,114 @@ Map<String, String> snapshot = cache.asMap();
 cache.invalidateAll();
 ```
 
+### Logging Configuration
+
+Kachi uses **`java.util.logging`** (JUL) for internal logging, following the same approach as Google Guava and Caffeine. This keeps the library **dependency-free** while providing flexible logging control.
+
+**Logger name:** `com.github.rudygunawan.kachi.Cache`
+
+#### What Gets Logged
+
+| Level | What's Logged | When to Use |
+|-------|---------------|-------------|
+| **WARNING** | Errors in custom policies/listeners (operations continue with fallback) | ✅ **Production (recommended)** |
+| **FINE** | Evictions, background refreshes | 🔍 **Debugging/Troubleshooting** |
+| **OFF** | Nothing | 🚫 **Performance testing** |
+
+#### Quick Configuration
+
+**Option 1: Programmatic (recommended)**
+
+```java
+import java.util.logging.Logger;
+import java.util.logging.Level;
+
+// Production: Only log errors (default)
+Logger.getLogger("com.github.rudygunawan.kachi.Cache").setLevel(Level.WARNING);
+
+// Debug: See evictions and refreshes
+Logger.getLogger("com.github.rudygunawan.kachi.Cache").setLevel(Level.FINE);
+
+// Silent: No logging at all
+Logger.getLogger("com.github.rudygunawan.kachi.Cache").setLevel(Level.OFF);
+```
+
+**Option 2: Using logging.properties file**
+
+```properties
+# Create logging.properties file
+com.github.rudygunawan.kachi.Cache.level=WARNING
+
+# Run your application
+java -Djava.util.logging.config.file=logging.properties YourApp
+```
+
+**Option 3: Quick helper methods**
+
+```java
+import com.github.rudygunawan.kachi.example.LoggingConfigurationExample.QuickSetup;
+
+// Quick setups for common scenarios
+QuickSetup.production();  // WARNING level
+QuickSetup.debug();       // FINE level
+QuickSetup.silent();      // OFF level
+```
+
+#### Integration with SLF4J
+
+If your application uses SLF4J/Logback/Log4j2, bridge JUL to your logging framework:
+
+```xml
+<!-- Add dependency -->
+<dependency>
+    <groupId>org.slf4j</groupId>
+    <artifactId>jul-to-slf4j</artifactId>
+    <version>2.0.9</version>
+</dependency>
+```
+
+```java
+// Install bridge at application startup
+import org.slf4j.bridge.SLF4JBridgeHandler;
+
+SLF4JBridgeHandler.removeHandlersForRootLogger();
+SLF4JBridgeHandler.install();
+```
+
+```xml
+<!-- Configure in logback.xml -->
+<logger name="com.github.rudygunawan.kachi.Cache" level="WARN"/>
+```
+
+**Note:** JUL-to-SLF4J bridge adds ~20% performance overhead (same trade-off as Guava/Caffeine).
+
+#### Example: Debug Mode for Troubleshooting
+
+```java
+import java.util.logging.*;
+
+// Enable detailed logging
+Logger logger = Logger.getLogger("com.github.rudygunawan.kachi.Cache");
+logger.setLevel(Level.FINE);
+
+// Add console handler
+ConsoleHandler handler = new ConsoleHandler();
+handler.setLevel(Level.FINE);
+logger.addHandler(handler);
+
+// Create cache
+Cache<String, String> cache = CacheBuilder.newBuilder()
+    .maximumSize(10)
+    .evictionPolicy(EvictionPolicy.WINDOW_TINY_LFU)
+    .build();
+
+// You'll now see logs like:
+// [FINE] Evicted entry due to size limit: key=key1, policy=WINDOW_TINY_LFU, size=10
+// [FINE] Successfully refreshed entry in background: key=stock123
+```
+
+See `LoggingConfigurationExample.java` for complete examples and advanced configuration.
+
 ## Configuration Options
 
 | Method | Description | Default |

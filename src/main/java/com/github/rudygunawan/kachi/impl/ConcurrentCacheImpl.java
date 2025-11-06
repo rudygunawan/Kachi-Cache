@@ -18,15 +18,34 @@ import java.util.*;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
+import java.util.logging.Level;
+import java.util.logging.Logger;
 
 /**
  * High-performance concurrent cache implementation with TTL, lazy loading, multiple eviction policies,
  * removal listeners, write-priority semantics, and Micrometer metrics support.
  *
+ * <p>Logging: This class uses java.util.logging for error and warning messages. Users can configure
+ * logging levels using standard JUL configuration. See {@link #LOGGER} for the logger name.
+ *
  * @param <K> the type of keys
  * @param <V> the type of values
  */
 public class ConcurrentCacheImpl<K, V> implements LoadingCache<K, V>, CacheMetrics {
+    /**
+     * Logger for cache operations. Logger name: "com.github.rudygunawan.kachi.Cache"
+     *
+     * <p>Log levels used:
+     * <ul>
+     *   <li>SEVERE: Critical errors that prevent cache operations</li>
+     *   <li>WARNING: Errors in custom policies or listeners (operations continue)</li>
+     *   <li>FINE: Detailed cache operations (evictions, refreshes)</li>
+     *   <li>FINER: Entry-level operations (put, get, remove)</li>
+     *   <li>FINEST: Detailed debugging information</li>
+     * </ul>
+     */
+    private static final Logger LOGGER = Logger.getLogger("com.github.rudygunawan.kachi.Cache");
+
     // Idle threshold - entries not accessed in last 5 minutes are considered idle
     private static final long IDLE_THRESHOLD_NANOS = 5L * 60 * 1_000_000_000; // 5 minutes
     private final ConcurrentHashMap<K, CacheEntry<V>> storage;
@@ -594,8 +613,8 @@ public class ConcurrentCacheImpl<K, V> implements LoadingCache<K, V>, CacheMetri
                 }
             } catch (Exception e) {
                 // If custom expiry throws an exception, log and fall back to default
-                // In a production environment, you might want to use a proper logger here
-                System.err.println("Error in custom expiry policy: " + e.getMessage());
+                LOGGER.log(Level.WARNING, "Error in custom expiry policy for key: " + key +
+                          ", falling back to default TTL", e);
             }
         }
 
@@ -690,6 +709,10 @@ public class ConcurrentCacheImpl<K, V> implements LoadingCache<K, V>, CacheMetri
                         removeFromEvictionQueues(keyToEvict);
                         fireRemovalEvent(keyToEvict, removed.getValue(), RemovalCause.SIZE);
                         if (recordStats) evictionCount.incrementAndGet();
+                        if (LOGGER.isLoggable(Level.FINE)) {
+                            LOGGER.fine("Evicted entry due to size limit: key=" + keyToEvict +
+                                       ", policy=" + evictionPolicy + ", size=" + storage.size());
+                        }
                     }
                 } finally {
                     lock.writeLock().unlock();
@@ -832,7 +855,8 @@ public class ConcurrentCacheImpl<K, V> implements LoadingCache<K, V>, CacheMetri
                 removalListener.onRemoval(key, value, cause);
             } catch (Exception e) {
                 // Log and swallow exceptions from listener
-                System.err.println("RemovalListener threw exception: " + e.getMessage());
+                LOGGER.log(Level.WARNING, "RemovalListener threw exception for key: " + key +
+                          ", cause: " + cause, e);
             }
         }
     }
@@ -877,7 +901,8 @@ public class ConcurrentCacheImpl<K, V> implements LoadingCache<K, V>, CacheMetri
                 return timeSinceRefresh >= refreshInterval;
             } catch (Exception e) {
                 // If policy throws exception, fall through to fixed interval
-                System.err.println("Error in refresh policy: " + e.getMessage());
+                LOGGER.log(Level.WARNING, "Error in refresh policy for key: " + key +
+                          ", falling back to fixed refresh interval", e);
             }
         }
 
@@ -917,6 +942,10 @@ public class ConcurrentCacheImpl<K, V> implements LoadingCache<K, V>, CacheMetri
                         newEntry.updateLastRefreshTime();
                         storage.put(key, newEntry);
 
+                        if (LOGGER.isLoggable(Level.FINE)) {
+                            LOGGER.fine("Successfully refreshed entry in background: key=" + key);
+                        }
+
                         // Notify refresh policy
                         if (refreshPolicy != null) {
                             try {
@@ -932,6 +961,10 @@ public class ConcurrentCacheImpl<K, V> implements LoadingCache<K, V>, CacheMetri
             }
         } catch (Exception e) {
             // Refresh failed - keep old value
+            if (LOGGER.isLoggable(Level.FINE)) {
+                LOGGER.log(Level.FINE, "Failed to refresh entry in background: key=" + key +
+                          ", keeping old value", e);
+            }
             if (refreshPolicy != null) {
                 try {
                     refreshPolicy.onRefreshFailure(key, oldEntry.getValue(), e, System.nanoTime());
