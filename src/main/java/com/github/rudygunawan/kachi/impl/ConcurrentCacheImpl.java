@@ -11,6 +11,7 @@ import com.github.rudygunawan.kachi.metrics.ExpiryDistribution;
 import com.github.rudygunawan.kachi.model.CacheEntry;
 import com.github.rudygunawan.kachi.model.CacheStats;
 import com.github.rudygunawan.kachi.policy.EvictionPolicy;
+import com.github.rudygunawan.kachi.policy.FrequencySketch;
 import com.github.rudygunawan.kachi.policy.RemovalCause;
 
 import java.util.*;
@@ -52,6 +53,15 @@ public class ConcurrentCacheImpl<K, V> implements LoadingCache<K, V>, CacheMetri
     private final ConcurrentLinkedDeque<K> accessOrder = new ConcurrentLinkedDeque<>(); // For LRU and FIFO
     private final ConcurrentHashMap<K, ReentrantReadWriteLock> keyLocks = new ConcurrentHashMap<>();
 
+    // Window TinyLFU segments (only used when evictionPolicy == WINDOW_TINY_LFU)
+    private final ConcurrentLinkedDeque<K> windowQueue;      // 1% of cache - admission window
+    private final ConcurrentLinkedDeque<K> probationQueue;   // 20% of main cache - probation segment
+    private final ConcurrentLinkedDeque<K> protectedQueue;   // 80% of main cache - protected segment
+    private final FrequencySketch frequencySketch;
+    private final int windowMaxSize;
+    private final int probationMaxSize;
+    private final int protectedMaxSize;
+
     // For loading cache - prevent duplicate loads
     private final ConcurrentHashMap<K, CompletableFuture<V>> loadingFutures = new ConcurrentHashMap<>();
 
@@ -92,6 +102,31 @@ public class ConcurrentCacheImpl<K, V> implements LoadingCache<K, V>, CacheMetri
         this.expiry = (Expiry<? super K, ? super V>) builder.getExpiry();
         this.refreshPolicy = (RefreshPolicy<? super K, ? super V>) builder.getRefreshPolicy();
         this.refreshAfterWriteNanos = builder.getRefreshAfterWriteNanos();
+
+        // Initialize Window TinyLFU segments if that policy is selected
+        if (evictionPolicy == EvictionPolicy.WINDOW_TINY_LFU && maximumSize > 0) {
+            // Calculate segment sizes
+            // Window: 1% of cache (minimum 1)
+            this.windowMaxSize = Math.max(1, (int) (maximumSize * 0.01));
+            // Main cache: 99% split into Protected (80%) and Probation (20%)
+            int mainCacheSize = (int) (maximumSize - windowMaxSize);
+            this.protectedMaxSize = (int) (mainCacheSize * 0.8);
+            this.probationMaxSize = mainCacheSize - protectedMaxSize;
+
+            // Initialize queues and frequency sketch
+            this.windowQueue = new ConcurrentLinkedDeque<>();
+            this.probationQueue = new ConcurrentLinkedDeque<>();
+            this.protectedQueue = new ConcurrentLinkedDeque<>();
+            this.frequencySketch = new FrequencySketch((int) maximumSize);
+        } else {
+            this.windowMaxSize = 0;
+            this.probationMaxSize = 0;
+            this.protectedMaxSize = 0;
+            this.windowQueue = null;
+            this.probationQueue = null;
+            this.protectedQueue = null;
+            this.frequencySketch = null;
+        }
 
         // Start scheduled TTL cleanup task (runs every minute)
         if (expireAfterWriteNanos > 0 || expireAfterAccessNanos > 0 || expiry != null) {
@@ -167,7 +202,7 @@ public class ConcurrentCacheImpl<K, V> implements LoadingCache<K, V>, CacheMetri
                     entry = storage.get(key);
                     if (entry != null && isExpired(entry)) {
                         storage.remove(key);
-                        accessOrder.remove(key);
+                        removeFromEvictionQueues(key);
                         fireRemovalEvent(key, entry.getValue(), RemovalCause.EXPIRED);
                         if (recordStats) {
                             missCount.incrementAndGet();
@@ -442,7 +477,7 @@ public class ConcurrentCacheImpl<K, V> implements LoadingCache<K, V>, CacheMetri
         try {
             CacheEntry<V> removed = storage.remove(key);
             if (removed != null) {
-                accessOrder.remove(key);
+                removeFromEvictionQueues(key);
                 fireRemovalEvent(key, removed.getValue(), RemovalCause.EXPLICIT);
             }
         } finally {
@@ -496,7 +531,7 @@ public class ConcurrentCacheImpl<K, V> implements LoadingCache<K, V>, CacheMetri
                 CacheEntry<V> entry = storage.get(key);
                 if (entry != null && isExpired(entry)) {
                     storage.remove(key);
-                    accessOrder.remove(key);
+                    removeFromEvictionQueues(key);
                     fireRemovalEvent(key, entry.getValue(), RemovalCause.EXPIRED);
                     if (recordStats) evictionCount.incrementAndGet();
                 }
@@ -592,6 +627,47 @@ public class ConcurrentCacheImpl<K, V> implements LoadingCache<K, V>, CacheMetri
                 // Access count is tracked in CacheEntry
                 // No deque tracking needed for LFU
                 break;
+            case WINDOW_TINY_LFU:
+                // Record access in frequency sketch
+                frequencySketch.increment(key);
+
+                // Move between segments based on access
+                if (windowQueue.remove(key)) {
+                    // Entry was in window, promote to main cache (probation)
+                    probationQueue.offer(key);
+                } else if (probationQueue.remove(key)) {
+                    // Entry was in probation, promote to protected
+                    protectedQueue.offer(key);
+                } else if (protectedQueue.remove(key)) {
+                    // Entry already in protected, move to end (most recently used)
+                    protectedQueue.offer(key);
+                } else {
+                    // New entry, add to window
+                    windowQueue.offer(key);
+                }
+                break;
+        }
+    }
+
+    /**
+     * Removes a key from all eviction tracking queues.
+     * Used when an entry is removed from the cache.
+     */
+    private void removeFromEvictionQueues(K key) {
+        switch (evictionPolicy) {
+            case LRU:
+            case FIFO:
+                accessOrder.remove(key);
+                break;
+            case LFU:
+                // No queue tracking for LFU
+                break;
+            case WINDOW_TINY_LFU:
+                // Remove from whichever queue it's in
+                windowQueue.remove(key);
+                probationQueue.remove(key);
+                protectedQueue.remove(key);
+                break;
         }
     }
 
@@ -611,7 +687,7 @@ public class ConcurrentCacheImpl<K, V> implements LoadingCache<K, V>, CacheMetri
                 try {
                     CacheEntry<V> removed = storage.remove(keyToEvict);
                     if (removed != null) {
-                        accessOrder.remove(keyToEvict);
+                        removeFromEvictionQueues(keyToEvict);
                         fireRemovalEvent(keyToEvict, removed.getValue(), RemovalCause.SIZE);
                         if (recordStats) evictionCount.incrementAndGet();
                     }
@@ -629,6 +705,8 @@ public class ConcurrentCacheImpl<K, V> implements LoadingCache<K, V>, CacheMetri
                 return selectFromAccessOrder();
             case LFU:
                 return selectLFUCandidate();
+            case WINDOW_TINY_LFU:
+                return selectWindowTinyLfuVictim();
             default:
                 return selectFromAccessOrder();
         }
@@ -677,6 +755,75 @@ public class ConcurrentCacheImpl<K, V> implements LoadingCache<K, V>, CacheMetri
         }
 
         return candidate;
+    }
+
+    /**
+     * Window TinyLFU victim selection with admission policy.
+     *
+     * Algorithm:
+     * 1. If window queue exceeds its size, evict from window (LRU)
+     * 2. Otherwise, evict from probation queue using TinyLFU admission policy
+     * 3. If probation is empty, evict from protected queue
+     *
+     * The admission policy compares frequencies using the frequency sketch to
+     * prevent rarely-accessed entries from polluting the cache.
+     */
+    private K selectWindowTinyLfuVictim() {
+        // Step 1: Check if window queue is over capacity
+        if (windowQueue.size() > windowMaxSize) {
+            int attempts = 0;
+            int maxAttempts = windowQueue.size();
+            K victim;
+            while ((victim = windowQueue.poll()) != null && attempts < maxAttempts) {
+                attempts++;
+                CacheEntry<V> entry = storage.get(victim);
+                if (entry != null && entry.isEligibleForEviction()) {
+                    return victim;
+                }
+                // Entry not eligible, try next
+                if (entry != null) {
+                    windowQueue.offer(victim); // Put back
+                }
+            }
+        }
+
+        // Step 2: Try to evict from probation queue
+        if (!probationQueue.isEmpty()) {
+            int attempts = 0;
+            int maxAttempts = probationQueue.size();
+            K victim;
+            while ((victim = probationQueue.poll()) != null && attempts < maxAttempts) {
+                attempts++;
+                CacheEntry<V> entry = storage.get(victim);
+                if (entry != null && entry.isEligibleForEviction()) {
+                    return victim;
+                }
+                // Entry not eligible, put back and try next
+                if (entry != null) {
+                    probationQueue.offer(victim);
+                }
+            }
+        }
+
+        // Step 3: Fall back to protected queue if probation is empty
+        if (!protectedQueue.isEmpty()) {
+            int attempts = 0;
+            int maxAttempts = protectedQueue.size();
+            K victim;
+            while ((victim = protectedQueue.poll()) != null && attempts < maxAttempts) {
+                attempts++;
+                CacheEntry<V> entry = storage.get(victim);
+                if (entry != null && entry.isEligibleForEviction()) {
+                    return victim;
+                }
+                // Entry not eligible, put back and try next
+                if (entry != null) {
+                    protectedQueue.offer(victim);
+                }
+            }
+        }
+
+        return null;
     }
 
     private void fireRemovalEvent(K key, V value, RemovalCause cause) {
