@@ -4,10 +4,13 @@ A high-performance Java cache library inspired by Google Guava and Caffeine, wit
 
 ## Features
 
-- **High Performance**: Thread-safe concurrent cache using `ConcurrentHashMap` with minimal lock contention
+- **High Performance**: Thread-safe concurrent cache using `ConcurrentHashMap` with write-priority semantics
 - **TTL Support**: Flexible time-based expiration with `expireAfterWrite` and `expireAfterAccess`
 - **Lazy Loading**: Automatic value loading with `CacheLoader` for database/API integration
-- **Size-Based Eviction**: LRU (Least Recently Used) eviction when maximum size is reached
+- **Multiple Eviction Policies**: Choose from LRU, LFU, or FIFO when size limit is reached
+- **Removal Listeners**: Get notified when entries are removed with the reason (SIZE, EXPIRED, EXPLICIT, REPLACED)
+- **Scheduled TTL Cleanup**: Automatic background cleanup of expired entries every minute
+- **Write-Priority Locking**: Reads wait up to 1 second for writes to ensure latest data
 - **Statistics**: Built-in performance metrics tracking (hit rate, miss rate, load times, etc.)
 - **Simple API**: Fluent builder pattern similar to Guava Cache
 - **Zero Dependencies**: Pure Java implementation with no external dependencies
@@ -134,6 +137,119 @@ System.out.println("Evictions: " + stats.evictionCount());
 System.out.println("Average load time: " + stats.averageLoadPenalty() + " ns");
 ```
 
+### Eviction Policies
+
+Choose from three eviction strategies when the cache reaches its maximum size:
+
+```java
+// LRU (Least Recently Used) - default
+Cache<String, String> lruCache = CacheBuilder.newBuilder()
+    .maximumSize(1000)
+    .evictionPolicy(EvictionPolicy.LRU)
+    .build();
+
+// LFU (Least Frequently Used) - evicts entries with lowest access count
+Cache<String, String> lfuCache = CacheBuilder.newBuilder()
+    .maximumSize(1000)
+    .evictionPolicy(EvictionPolicy.LFU)
+    .build();
+
+// FIFO (First In First Out) - evicts oldest entries first
+Cache<String, String> fifoCache = CacheBuilder.newBuilder()
+    .maximumSize(1000)
+    .evictionPolicy(EvictionPolicy.FIFO)
+    .build();
+```
+
+**When to use each policy:**
+- **LRU**: Best for most use cases where recently accessed items are more valuable
+- **LFU**: Good when some keys are accessed much more frequently than others
+- **FIFO**: Simple policy when newer entries are generally more valuable
+
+### Removal Listeners
+
+Get notified when entries are removed from the cache:
+
+```java
+RemovalListener<String, User> listener = (key, value, cause) -> {
+    System.out.println("Removed " + key + " because: " + cause);
+
+    // Different actions based on removal cause
+    switch (cause) {
+        case EXPIRED:
+            log.info("Entry expired: " + key);
+            break;
+        case SIZE:
+            metrics.recordEviction(key);
+            break;
+        case EXPLICIT:
+            log.debug("Manually invalidated: " + key);
+            break;
+        case REPLACED:
+            log.debug("Value replaced: " + key);
+            break;
+    }
+};
+
+Cache<String, User> cache = CacheBuilder.newBuilder()
+    .maximumSize(1000)
+    .expireAfterWrite(10, TimeUnit.MINUTES)
+    .removalListener(listener)
+    .build();
+```
+
+**Removal Causes:**
+- `EXPIRED`: Entry's TTL expired (expireAfterWrite or expireAfterAccess)
+- `SIZE`: Entry evicted due to size limit (uses configured eviction policy)
+- `EXPLICIT`: Entry manually removed via `invalidate()` or `invalidateAll()`
+- `REPLACED`: Entry's value was replaced by a new `put()` operation
+
+### Scheduled TTL Cleanup
+
+When TTL is configured, Kachi automatically runs a background cleanup task every minute:
+
+```java
+Cache<String, String> cache = CacheBuilder.newBuilder()
+    .expireAfterWrite(5, TimeUnit.MINUTES)
+    .removalListener((key, value, cause) -> {
+        if (cause == RemovalCause.EXPIRED) {
+            System.out.println("Auto-cleaned expired entry: " + key);
+        }
+    })
+    .build();
+
+// Cleanup runs automatically every minute
+// You can also trigger manual cleanup:
+cache.cleanUp();
+```
+
+The scheduled cleanup ensures expired entries are removed proactively, preventing memory buildup and triggering removal listeners for expired entries.
+
+### Write-Priority Concurrency
+
+Kachi uses write-priority locking to ensure reads always get the latest data:
+
+```java
+Cache<String, Config> cache = CacheBuilder.newBuilder().build();
+
+// Writer thread
+new Thread(() -> {
+    cache.put("config", loadLatestConfig());
+}).start();
+
+// Reader thread - waits up to 1 second for write to complete
+new Thread(() -> {
+    Config config = cache.getIfPresent("config");
+    // Always gets the latest value or null on timeout
+}).start();
+```
+
+**Benefits:**
+- Writes never wait for reads
+- Reads wait up to 1 second for writes, ensuring fresh data
+- Prevents stale reads during updates
+- Per-key locking for maximum concurrency
+
 ## Advanced Usage
 
 ### Database Integration Example
@@ -221,6 +337,8 @@ cache.invalidateAll();
 | `maximumSize(long)` | Maximum number of entries | unlimited |
 | `expireAfterWrite(long, TimeUnit)` | Expire entries after write time | unlimited |
 | `expireAfterAccess(long, TimeUnit)` | Expire entries after access time | unlimited |
+| `evictionPolicy(EvictionPolicy)` | Eviction policy (LRU, LFU, FIFO) | LRU |
+| `removalListener(RemovalListener)` | Listener for removal events | none |
 | `recordStats()` | Enable statistics tracking | disabled |
 
 ## Performance

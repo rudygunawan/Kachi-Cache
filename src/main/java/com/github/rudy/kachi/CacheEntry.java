@@ -12,6 +12,7 @@ class CacheEntry<V> {
     private final long writeTime;
     private final long expirationTime;
     private final AtomicLong accessTime;
+    private final AtomicLong accessCount;
 
     /**
      * Creates a new cache entry with the specified value and expiration.
@@ -24,6 +25,7 @@ class CacheEntry<V> {
         this.writeTime = System.nanoTime();
         this.expirationTime = ttlNanos > 0 ? writeTime + ttlNanos : Long.MAX_VALUE;
         this.accessTime = new AtomicLong(writeTime);
+        this.accessCount = new AtomicLong(0);
     }
 
     /**
@@ -55,10 +57,18 @@ class CacheEntry<V> {
     }
 
     /**
-     * Updates the access time to the current time.
+     * Updates the access time to the current time and increments access count.
      */
     void updateAccessTime() {
         accessTime.set(System.nanoTime());
+        accessCount.incrementAndGet();
+    }
+
+    /**
+     * Returns the number of times this entry has been accessed.
+     */
+    long getAccessCount() {
+        return accessCount.get();
     }
 
     /**

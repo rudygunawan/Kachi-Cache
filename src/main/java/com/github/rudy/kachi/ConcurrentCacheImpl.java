@@ -3,10 +3,11 @@ package com.github.rudy.kachi;
 import java.util.*;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicLong;
-import java.util.concurrent.locks.ReentrantLock;
+import java.util.concurrent.locks.ReentrantReadWriteLock;
 
 /**
- * High-performance concurrent cache implementation with TTL, lazy loading, and LRU eviction support.
+ * High-performance concurrent cache implementation with TTL, lazy loading, multiple eviction policies,
+ * removal listeners, and write-priority semantics.
  *
  * @param <K> the type of keys
  * @param <V> the type of values
@@ -18,6 +19,8 @@ class ConcurrentCacheImpl<K, V> implements LoadingCache<K, V> {
     private final long expireAfterWriteNanos;
     private final long expireAfterAccessNanos;
     private final boolean recordStats;
+    private final EvictionPolicy evictionPolicy;
+    private final RemovalListener<? super K, ? super V> removalListener;
 
     // Statistics
     private final AtomicLong hitCount = new AtomicLong(0);
@@ -27,12 +30,19 @@ class ConcurrentCacheImpl<K, V> implements LoadingCache<K, V> {
     private final AtomicLong totalLoadTime = new AtomicLong(0);
     private final AtomicLong evictionCount = new AtomicLong(0);
 
-    // LRU tracking
-    private final ConcurrentLinkedDeque<K> accessOrder = new ConcurrentLinkedDeque<>();
-    private final ReentrantLock evictionLock = new ReentrantLock();
+    // Eviction tracking - different for each policy
+    private final ConcurrentLinkedDeque<K> accessOrder = new ConcurrentLinkedDeque<>(); // For LRU and FIFO
+    private final ConcurrentHashMap<K, ReentrantReadWriteLock> keyLocks = new ConcurrentHashMap<>();
 
     // For loading cache - prevent duplicate loads
     private final ConcurrentHashMap<K, CompletableFuture<V>> loadingFutures = new ConcurrentHashMap<>();
+
+    // Scheduled cleanup for TTL expiration
+    private final ScheduledExecutorService cleanupScheduler;
+    private final ScheduledFuture<?> cleanupTask;
+
+    // Read timeout for write-priority
+    private static final long READ_TIMEOUT_MS = 1000;
 
     /**
      * Constructor for non-loading cache.
@@ -44,6 +54,7 @@ class ConcurrentCacheImpl<K, V> implements LoadingCache<K, V> {
     /**
      * Constructor for loading cache.
      */
+    @SuppressWarnings("unchecked")
     ConcurrentCacheImpl(CacheBuilder<?, ?> builder, CacheLoader<? super K, V> loader) {
         this.storage = new ConcurrentHashMap<>(builder.getInitialCapacity(), 0.75f, builder.getConcurrencyLevel());
         this.loader = loader;
@@ -51,39 +62,93 @@ class ConcurrentCacheImpl<K, V> implements LoadingCache<K, V> {
         this.expireAfterWriteNanos = builder.getExpireAfterWriteNanos();
         this.expireAfterAccessNanos = builder.getExpireAfterAccessNanos();
         this.recordStats = builder.isRecordingStats();
+        this.evictionPolicy = builder.getEvictionPolicy();
+        this.removalListener = (RemovalListener<? super K, ? super V>) builder.getRemovalListener();
+
+        // Start scheduled TTL cleanup task (runs every minute)
+        if (expireAfterWriteNanos > 0 || expireAfterAccessNanos > 0) {
+            this.cleanupScheduler = Executors.newSingleThreadScheduledExecutor(r -> {
+                Thread t = new Thread(r, "kachi-cache-cleanup");
+                t.setDaemon(true);
+                return t;
+            });
+            this.cleanupTask = cleanupScheduler.scheduleAtFixedRate(
+                    this::cleanUp,
+                    1, 1, TimeUnit.MINUTES
+            );
+        } else {
+            this.cleanupScheduler = null;
+            this.cleanupTask = null;
+        }
     }
 
     @Override
     public V getIfPresent(K key) {
         Objects.requireNonNull(key, "key cannot be null");
-        CacheEntry<V> entry = storage.get(key);
 
-        if (entry == null) {
+        // Acquire read lock with timeout for write-priority
+        ReentrantReadWriteLock lock = getOrCreateLock(key);
+        boolean readLockHeld = false;
+        try {
+            if (!lock.readLock().tryLock(READ_TIMEOUT_MS, TimeUnit.MILLISECONDS)) {
+                // Timeout waiting for write to complete
+                if (recordStats) missCount.incrementAndGet();
+                return null;
+            }
+            readLockHeld = true;
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
             if (recordStats) missCount.incrementAndGet();
             return null;
         }
 
-        // Check if expired
-        if (isExpired(entry)) {
-            storage.remove(key, entry);
-            accessOrder.remove(key);
-            if (recordStats) {
-                missCount.incrementAndGet();
-                evictionCount.incrementAndGet();
+        try {
+            CacheEntry<V> entry = storage.get(key);
+
+            if (entry == null) {
+                if (recordStats) missCount.incrementAndGet();
+                return null;
             }
-            return null;
+
+            // Check if expired
+            if (isExpired(entry)) {
+                lock.readLock().unlock();
+                readLockHeld = false;
+                // Upgrade to write lock to remove
+                lock.writeLock().lock();
+                try {
+                    // Double-check after acquiring write lock
+                    entry = storage.get(key);
+                    if (entry != null && isExpired(entry)) {
+                        storage.remove(key);
+                        accessOrder.remove(key);
+                        fireRemovalEvent(key, entry.getValue(), RemovalCause.EXPIRED);
+                        if (recordStats) {
+                            missCount.incrementAndGet();
+                            evictionCount.incrementAndGet();
+                        }
+                    }
+                    return null;
+                } finally {
+                    lock.writeLock().unlock();
+                }
+            }
+
+            // Update access time for expire-after-access
+            if (expireAfterAccessNanos > 0) {
+                entry.updateAccessTime();
+            }
+
+            // Update tracking for eviction policy
+            updateAccessTracking(key);
+
+            if (recordStats) hitCount.incrementAndGet();
+            return entry.getValue();
+        } finally {
+            if (readLockHeld) {
+                lock.readLock().unlock();
+            }
         }
-
-        // Update access time for expire-after-access
-        if (expireAfterAccessNanos > 0) {
-            entry.updateAccessTime();
-        }
-
-        // Update LRU order
-        updateAccessOrder(key);
-
-        if (recordStats) hitCount.incrementAndGet();
-        return entry.getValue();
     }
 
     @Override
@@ -96,25 +161,41 @@ class ConcurrentCacheImpl<K, V> implements LoadingCache<K, V> {
             return value;
         }
 
-        // Load the value
-        long startTime = System.nanoTime();
+        // Load the value with write lock
+        ReentrantReadWriteLock lock = getOrCreateLock(key);
+        lock.writeLock().lock();
         try {
-            value = loader.call();
-            if (value == null) {
-                throw new NullPointerException("loader returned null value");
+            // Double-check after acquiring write lock
+            CacheEntry<V> entry = storage.get(key);
+            if (entry != null && !isExpired(entry)) {
+                if (expireAfterAccessNanos > 0) {
+                    entry.updateAccessTime();
+                }
+                if (recordStats) hitCount.incrementAndGet();
+                return entry.getValue();
             }
-            put(key, value);
-            if (recordStats) {
-                loadSuccessCount.incrementAndGet();
-                totalLoadTime.addAndGet(System.nanoTime() - startTime);
+
+            long startTime = System.nanoTime();
+            try {
+                value = loader.call();
+                if (value == null) {
+                    throw new NullPointerException("loader returned null value");
+                }
+                putInternal(key, value, RemovalCause.REPLACED);
+                if (recordStats) {
+                    loadSuccessCount.incrementAndGet();
+                    totalLoadTime.addAndGet(System.nanoTime() - startTime);
+                }
+                return value;
+            } catch (Exception e) {
+                if (recordStats) {
+                    loadFailureCount.incrementAndGet();
+                    totalLoadTime.addAndGet(System.nanoTime() - startTime);
+                }
+                throw e;
             }
-            return value;
-        } catch (Exception e) {
-            if (recordStats) {
-                loadFailureCount.incrementAndGet();
-                totalLoadTime.addAndGet(System.nanoTime() - startTime);
-            }
-            throw e;
+        } finally {
+            lock.writeLock().unlock();
         }
     }
 
@@ -134,7 +215,6 @@ class ConcurrentCacheImpl<K, V> implements LoadingCache<K, V> {
         // Use CompletableFuture to ensure only one thread loads a given key
         CompletableFuture<V> future = loadingFutures.get(key);
         if (future != null) {
-            // Another thread is already loading this key
             try {
                 return future.get();
             } catch (ExecutionException e) {
@@ -146,12 +226,10 @@ class ConcurrentCacheImpl<K, V> implements LoadingCache<K, V> {
             }
         }
 
-        // Create a new future for this load operation
         CompletableFuture<V> newFuture = new CompletableFuture<>();
         CompletableFuture<V> existingFuture = loadingFutures.putIfAbsent(key, newFuture);
 
         if (existingFuture != null) {
-            // Another thread beat us to it
             try {
                 return existingFuture.get();
             } catch (ExecutionException e) {
@@ -163,28 +241,43 @@ class ConcurrentCacheImpl<K, V> implements LoadingCache<K, V> {
             }
         }
 
-        // We're responsible for loading
-        long startTime = System.nanoTime();
+        // We're responsible for loading with write lock
+        ReentrantReadWriteLock lock = getOrCreateLock(key);
+        lock.writeLock().lock();
         try {
-            value = loader.load(key);
-            if (value == null) {
-                throw new NullPointerException("loader returned null value for key: " + key);
+            // Double-check after acquiring write lock
+            CacheEntry<V> entry = storage.get(key);
+            if (entry != null && !isExpired(entry)) {
+                if (expireAfterAccessNanos > 0) {
+                    entry.updateAccessTime();
+                }
+                newFuture.complete(entry.getValue());
+                return entry.getValue();
             }
-            put(key, value);
-            if (recordStats) {
-                loadSuccessCount.incrementAndGet();
-                totalLoadTime.addAndGet(System.nanoTime() - startTime);
+
+            long startTime = System.nanoTime();
+            try {
+                value = loader.load(key);
+                if (value == null) {
+                    throw new NullPointerException("loader returned null value for key: " + key);
+                }
+                putInternal(key, value, RemovalCause.REPLACED);
+                if (recordStats) {
+                    loadSuccessCount.incrementAndGet();
+                    totalLoadTime.addAndGet(System.nanoTime() - startTime);
+                }
+                newFuture.complete(value);
+                return value;
+            } catch (Exception e) {
+                if (recordStats) {
+                    loadFailureCount.incrementAndGet();
+                    totalLoadTime.addAndGet(System.nanoTime() - startTime);
+                }
+                newFuture.completeExceptionally(e);
+                throw e;
             }
-            newFuture.complete(value);
-            return value;
-        } catch (Exception e) {
-            if (recordStats) {
-                loadFailureCount.incrementAndGet();
-                totalLoadTime.addAndGet(System.nanoTime() - startTime);
-            }
-            newFuture.completeExceptionally(e);
-            throw e;
         } finally {
+            lock.writeLock().unlock();
             loadingFutures.remove(key);
         }
     }
@@ -212,7 +305,6 @@ class ConcurrentCacheImpl<K, V> implements LoadingCache<K, V> {
             return Collections.unmodifiableMap(result);
         }
 
-        // Try bulk load if supported
         try {
             @SuppressWarnings("unchecked")
             Map<K, V> loaded = (Map<K, V>) loader.loadAll(keysToLoad);
@@ -223,7 +315,6 @@ class ConcurrentCacheImpl<K, V> implements LoadingCache<K, V> {
                 }
             }
         } catch (UnsupportedOperationException e) {
-            // Fall back to individual loads
             for (K key : keysToLoad) {
                 try {
                     V value = get(key);
@@ -245,7 +336,6 @@ class ConcurrentCacheImpl<K, V> implements LoadingCache<K, V> {
 
         Objects.requireNonNull(key, "key cannot be null");
 
-        // Asynchronously reload the value
         CompletableFuture.runAsync(() -> {
             try {
                 V newValue = loader.load(key);
@@ -253,7 +343,7 @@ class ConcurrentCacheImpl<K, V> implements LoadingCache<K, V> {
                     put(key, newValue);
                 }
             } catch (Exception e) {
-                // Log and swallow exception as per contract
+                // Log and swallow as per contract
             }
         });
     }
@@ -263,12 +353,28 @@ class ConcurrentCacheImpl<K, V> implements LoadingCache<K, V> {
         Objects.requireNonNull(key, "key cannot be null");
         Objects.requireNonNull(value, "value cannot be null");
 
-        long ttl = getTtlForEntry();
-        CacheEntry<V> entry = new CacheEntry<>(value, ttl);
-        storage.put(key, entry);
-        updateAccessOrder(key);
+        ReentrantReadWriteLock lock = getOrCreateLock(key);
+        lock.writeLock().lock();
+        try {
+            putInternal(key, value, RemovalCause.REPLACED);
+        } finally {
+            lock.writeLock().unlock();
+        }
+    }
 
-        // Check if we need to evict
+    /**
+     * Internal put method that must be called with write lock held.
+     */
+    private void putInternal(K key, V value, RemovalCause replacementCause) {
+        long ttl = getTtlForEntry();
+        CacheEntry<V> newEntry = new CacheEntry<>(value, ttl);
+
+        CacheEntry<V> oldEntry = storage.put(key, newEntry);
+        if (oldEntry != null) {
+            fireRemovalEvent(key, oldEntry.getValue(), replacementCause);
+        }
+
+        updateAccessTracking(key);
         evictIfNecessary();
     }
 
@@ -283,20 +389,31 @@ class ConcurrentCacheImpl<K, V> implements LoadingCache<K, V> {
     @Override
     public void invalidate(K key) {
         Objects.requireNonNull(key, "key cannot be null");
-        if (storage.remove(key) != null) {
-            accessOrder.remove(key);
+
+        ReentrantReadWriteLock lock = getOrCreateLock(key);
+        lock.writeLock().lock();
+        try {
+            CacheEntry<V> removed = storage.remove(key);
+            if (removed != null) {
+                accessOrder.remove(key);
+                fireRemovalEvent(key, removed.getValue(), RemovalCause.EXPLICIT);
+            }
+        } finally {
+            lock.writeLock().unlock();
         }
     }
 
     @Override
     public void invalidateAll() {
-        storage.clear();
-        accessOrder.clear();
+        // Take snapshot to avoid concurrent modification
+        Set<K> keys = new HashSet<>(storage.keySet());
+        for (K key : keys) {
+            invalidate(key);
+        }
     }
 
     @Override
     public long size() {
-        cleanUp();
         return storage.size();
     }
 
@@ -314,22 +431,36 @@ class ConcurrentCacheImpl<K, V> implements LoadingCache<K, V> {
 
     @Override
     public void cleanUp() {
-        // Remove expired entries
         long now = System.nanoTime();
-        Iterator<Map.Entry<K, CacheEntry<V>>> iterator = storage.entrySet().iterator();
-        while (iterator.hasNext()) {
-            Map.Entry<K, CacheEntry<V>> entry = iterator.next();
+        List<K> keysToRemove = new ArrayList<>();
+
+        // Find expired entries
+        for (Map.Entry<K, CacheEntry<V>> entry : storage.entrySet()) {
             if (isExpired(entry.getValue())) {
-                iterator.remove();
-                accessOrder.remove(entry.getKey());
-                if (recordStats) evictionCount.incrementAndGet();
+                keysToRemove.add(entry.getKey());
+            }
+        }
+
+        // Remove expired entries
+        for (K key : keysToRemove) {
+            ReentrantReadWriteLock lock = getOrCreateLock(key);
+            lock.writeLock().lock();
+            try {
+                CacheEntry<V> entry = storage.get(key);
+                if (entry != null && isExpired(entry)) {
+                    storage.remove(key);
+                    accessOrder.remove(key);
+                    fireRemovalEvent(key, entry.getValue(), RemovalCause.EXPIRED);
+                    if (recordStats) evictionCount.incrementAndGet();
+                }
+            } finally {
+                lock.writeLock().unlock();
             }
         }
     }
 
     @Override
     public Map<K, V> asMap() {
-        cleanUp();
         Map<K, V> result = new LinkedHashMap<>();
         for (Map.Entry<K, CacheEntry<V>> entry : storage.entrySet()) {
             if (!isExpired(entry.getValue())) {
@@ -340,6 +471,10 @@ class ConcurrentCacheImpl<K, V> implements LoadingCache<K, V> {
     }
 
     // Helper methods
+
+    private ReentrantReadWriteLock getOrCreateLock(K key) {
+        return keyLocks.computeIfAbsent(key, k -> new ReentrantReadWriteLock());
+    }
 
     private boolean isExpired(CacheEntry<V> entry) {
         if (expireAfterWriteNanos > 0 && entry.isExpired()) {
@@ -356,16 +491,31 @@ class ConcurrentCacheImpl<K, V> implements LoadingCache<K, V> {
         if (expireAfterWriteNanos > 0) {
             return expireAfterWriteNanos;
         }
-        return 0; // No expiration
+        return 0;
     }
 
-    private void updateAccessOrder(K key) {
+    private void updateAccessTracking(K key) {
         if (maximumSize <= 0) {
             return;
         }
-        // Remove and re-add to move to end (most recently used)
-        accessOrder.remove(key);
-        accessOrder.offer(key);
+
+        switch (evictionPolicy) {
+            case LRU:
+                // Remove and re-add to move to end (most recently used)
+                accessOrder.remove(key);
+                accessOrder.offer(key);
+                break;
+            case FIFO:
+                // Only add if not present (keep insertion order)
+                if (!accessOrder.contains(key)) {
+                    accessOrder.offer(key);
+                }
+                break;
+            case LFU:
+                // Access count is tracked in CacheEntry
+                // No deque tracking needed for LFU
+                break;
+        }
     }
 
     private void evictIfNecessary() {
@@ -374,21 +524,75 @@ class ConcurrentCacheImpl<K, V> implements LoadingCache<K, V> {
         }
 
         while (storage.size() > maximumSize) {
-            evictionLock.lock();
-            try {
-                // Double-check after acquiring lock
-                if (storage.size() <= maximumSize) {
-                    break;
-                }
+            K keyToEvict = selectKeyToEvict();
+            if (keyToEvict == null) {
+                break;
+            }
 
-                // Evict least recently used
-                K keyToEvict = accessOrder.poll();
-                if (keyToEvict != null && storage.remove(keyToEvict) != null) {
-                    if (recordStats) evictionCount.incrementAndGet();
+            ReentrantReadWriteLock lock = getOrCreateLock(keyToEvict);
+            if (lock.writeLock().tryLock()) {
+                try {
+                    CacheEntry<V> removed = storage.remove(keyToEvict);
+                    if (removed != null) {
+                        accessOrder.remove(keyToEvict);
+                        fireRemovalEvent(keyToEvict, removed.getValue(), RemovalCause.SIZE);
+                        if (recordStats) evictionCount.incrementAndGet();
+                    }
+                } finally {
+                    lock.writeLock().unlock();
                 }
-            } finally {
-                evictionLock.unlock();
             }
         }
     }
+
+    private K selectKeyToEvict() {
+        switch (evictionPolicy) {
+            case LRU:
+            case FIFO:
+                return accessOrder.poll();
+            case LFU:
+                return selectLFUCandidate();
+            default:
+                return accessOrder.poll();
+        }
+    }
+
+    private K selectLFUCandidate() {
+        K candidate = null;
+        long minCount = Long.MAX_VALUE;
+
+        for (Map.Entry<K, CacheEntry<V>> entry : storage.entrySet()) {
+            long count = entry.getValue().getAccessCount();
+            if (count < minCount) {
+                minCount = count;
+                candidate = entry.getKey();
+            }
+        }
+
+        return candidate;
+    }
+
+    private void fireRemovalEvent(K key, V value, RemovalCause cause) {
+        if (removalListener != null) {
+            try {
+                removalListener.onRemoval(key, value, cause);
+            } catch (Exception e) {
+                // Log and swallow exceptions from listener
+                System.err.println("RemovalListener threw exception: " + e.getMessage());
+            }
+        }
+    }
+
+    /**
+     * Shutdown the cleanup scheduler when cache is no longer needed.
+     */
+    public void shutdown() {
+        if (cleanupTask != null) {
+            cleanupTask.cancel(false);
+        }
+        if (cleanupScheduler != null) {
+            cleanupScheduler.shutdown();
+        }
+    }
+
 }

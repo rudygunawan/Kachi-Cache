@@ -45,6 +45,8 @@ public class CacheBuilder<K, V> {
     private long expireAfterWriteNanos = UNSET_INT;
     private long expireAfterAccessNanos = UNSET_INT;
     private boolean recordStats = false;
+    private EvictionPolicy evictionPolicy = EvictionPolicy.LRU;
+    private RemovalListener<? super K, ? super V> removalListener;
 
     private CacheBuilder() {
     }
@@ -176,6 +178,48 @@ public class CacheBuilder<K, V> {
     }
 
     /**
+     * Specifies the eviction policy to use when the cache reaches its maximum size.
+     *
+     * <p>Available policies:
+     * <ul>
+     *   <li>{@link EvictionPolicy#LRU} - Least Recently Used (default)
+     *   <li>{@link EvictionPolicy#LFU} - Least Frequently Used
+     *   <li>{@link EvictionPolicy#FIFO} - First In First Out
+     * </ul>
+     *
+     * @param policy the eviction policy to use
+     * @return this builder instance
+     */
+    public CacheBuilder<K, V> evictionPolicy(EvictionPolicy policy) {
+        if (policy == null) {
+            throw new NullPointerException("eviction policy cannot be null");
+        }
+        this.evictionPolicy = policy;
+        return this;
+    }
+
+    /**
+     * Specifies a listener instance that caches should notify each time an entry is removed for any
+     * reason. Each cache created by this builder will invoke this listener as part of the routine
+     * maintenance described in the {@link Cache} documentation.
+     *
+     * <p><b>Warning:</b> all exceptions thrown by {@code listener} will be logged and then swallowed.
+     *
+     * @param listener the removal listener to use
+     * @return this builder instance
+     */
+    public <K1 extends K, V1 extends V> CacheBuilder<K1, V1> removalListener(
+            RemovalListener<? super K1, ? super V1> listener) {
+        if (listener == null) {
+            throw new NullPointerException("removal listener cannot be null");
+        }
+        @SuppressWarnings("unchecked")
+        CacheBuilder<K1, V1> me = (CacheBuilder<K1, V1>) this;
+        me.removalListener = listener;
+        return me;
+    }
+
+    /**
      * Builds a cache which does not automatically load values when keys are requested.
      *
      * @return a cache having the requested features
@@ -220,5 +264,13 @@ public class CacheBuilder<K, V> {
 
     boolean isRecordingStats() {
         return recordStats;
+    }
+
+    EvictionPolicy getEvictionPolicy() {
+        return evictionPolicy;
+    }
+
+    RemovalListener<? super K, ? super V> getRemovalListener() {
+        return removalListener;
     }
 }
