@@ -8,8 +8,9 @@ import java.util.concurrent.atomic.AtomicLong;
  * @param <V> the type of the cached value
  */
 public class CacheEntry<V> {
-    // Minimum time an entry must stay in cache before eligible for eviction (1 minute)
-    private static final long MIN_EVICTION_AGE_NANOS = 60_000_000_000L; // 60 seconds
+    // Minimum time an entry must stay in cache before eligible for eviction (1 second)
+    // This prevents rapid thrashing while still allowing timely eviction
+    private static final long MIN_EVICTION_AGE_NANOS = 1_000_000_000L; // 1 second
 
     private final V value;
     private final long writeTime;
@@ -17,6 +18,7 @@ public class CacheEntry<V> {
     private final AtomicLong accessTime;
     private final AtomicLong accessCount;
     private final AtomicLong lastRefreshTime;
+    private final int weight;
 
     /**
      * Creates a new cache entry with the specified value and expiration.
@@ -25,12 +27,24 @@ public class CacheEntry<V> {
      * @param ttlNanos the time-to-live in nanoseconds, or 0 for no expiration
      */
     public CacheEntry(V value, long ttlNanos) {
+        this(value, ttlNanos, 1);
+    }
+
+    /**
+     * Creates a new cache entry with the specified value, expiration, and weight.
+     *
+     * @param value the value to cache
+     * @param ttlNanos the time-to-live in nanoseconds, or 0 for no expiration
+     * @param weight the weight of this entry for size-based eviction
+     */
+    public CacheEntry(V value, long ttlNanos, int weight) {
         this.value = value;
         this.writeTime = System.nanoTime();
         this.expirationTime = ttlNanos > 0 ? writeTime + ttlNanos : Long.MAX_VALUE;
         this.accessTime = new AtomicLong(writeTime);
         this.accessCount = new AtomicLong(0);
         this.lastRefreshTime = new AtomicLong(writeTime);
+        this.weight = weight;
     }
 
     /**
@@ -99,7 +113,7 @@ public class CacheEntry<V> {
 
     /**
      * Returns true if this entry is old enough to be considered for eviction.
-     * Entries must be at least 1 minute old before they can be evicted.
+     * Entries must be at least 1 second old before they can be evicted to prevent thrashing.
      */
     public boolean isEligibleForEviction() {
         return getAgeNanos() >= MIN_EVICTION_AGE_NANOS;
@@ -117,5 +131,12 @@ public class CacheEntry<V> {
      */
     public void updateLastRefreshTime() {
         lastRefreshTime.set(System.nanoTime());
+    }
+
+    /**
+     * Returns the weight of this entry.
+     */
+    public int getWeight() {
+        return weight;
     }
 }

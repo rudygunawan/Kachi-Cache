@@ -5,6 +5,7 @@ import com.github.rudygunawan.kachi.api.CacheLoader;
 import com.github.rudygunawan.kachi.api.Expiry;
 import com.github.rudygunawan.kachi.api.LoadingCache;
 import com.github.rudygunawan.kachi.api.RefreshPolicy;
+import com.github.rudygunawan.kachi.api.Weigher;
 import com.github.rudygunawan.kachi.impl.ConcurrentCacheImpl;
 import com.github.rudygunawan.kachi.listener.RemovalListener;
 import com.github.rudygunawan.kachi.policy.EvictionPolicy;
@@ -51,6 +52,8 @@ public class CacheBuilder<K, V> {
     private int initialCapacity = DEFAULT_INITIAL_CAPACITY;
     private int concurrencyLevel = DEFAULT_CONCURRENCY_LEVEL;
     private long maximumSize = UNSET_INT;
+    private long maximumWeight = UNSET_INT;
+    private Weigher<? super K, ? super V> weigher;
     private long expireAfterWriteNanos = UNSET_INT;
     private long expireAfterAccessNanos = UNSET_INT;
     private boolean recordStats = false;
@@ -125,6 +128,91 @@ public class CacheBuilder<K, V> {
         }
         this.maximumSize = size;
         return this;
+    }
+
+    /**
+     * Specifies the maximum weight of entries the cache may contain. Weight is determined using the
+     * {@link Weigher} specified in {@link #weigher}, and use of this method requires a corresponding
+     * call to {@link #weigher} prior to calling {@link #build}.
+     *
+     * <p>Note that the cache may evict an entry before this limit is exceeded. As the cache size
+     * grows close to the maximum, the cache evicts entries that are less likely to be used again.
+     * For example, the cache may evict an entry because it hasn't been used recently or very often.
+     *
+     * <p>When {@code weight} is zero, elements will be evicted immediately after being loaded into the
+     * cache. This can be useful in testing, or to disable caching temporarily without a code change.
+     *
+     * <p>This option is not required; if not specified, the cache has no weight-based eviction.
+     *
+     * <p><b>Note:</b> You can use both {@code maximumSize} and {@code maximumWeight} together. The cache
+     * will evict when either limit is reached.
+     *
+     * @param weight the maximum total weight of entries the cache may contain
+     * @return this builder instance
+     * @throws IllegalArgumentException if {@code weight} is negative
+     * @throws IllegalStateException if a maximum weight was already set
+     * @see #weigher(Weigher)
+     */
+    public CacheBuilder<K, V> maximumWeight(long weight) {
+        if (weight < 0) {
+            throw new IllegalArgumentException("maximum weight must not be negative");
+        }
+        if (this.maximumWeight != UNSET_INT) {
+            throw new IllegalStateException("maximum weight was already set to " + this.maximumWeight);
+        }
+        this.maximumWeight = weight;
+        return this;
+    }
+
+    /**
+     * Specifies the weigher to use in determining the weight of entries. Entry weight is taken
+     * into consideration by {@link #maximumWeight(long)} when determining which entries to evict.
+     *
+     * <p>The weigher is called on every cache write (put/load). Keep the weight calculation fast
+     * and simple. Avoid I/O, complex calculations, or operations that could throw exceptions.
+     *
+     * <p><b>Important:</b> Instead of returning {@code this} as a {@code CacheBuilder} instance,
+     * this method returns {@code CacheBuilder<K1, V1>}. From this point on, the cache builder is
+     * assumed to be of the correct types, and methods like {@code build()} will return cache
+     * instances with those types.
+     *
+     * <p><b>Example usage:</b>
+     * <pre>{@code
+     * // Weight by byte array length
+     * Cache<String, byte[]> cache = CacheBuilder.newBuilder()
+     *     .maximumWeight(10_000_000)  // 10 MB
+     *     .weigher((key, value) -> value.length)
+     *     .build();
+     *
+     * // Weight by string length
+     * Cache<String, String> cache = CacheBuilder.newBuilder()
+     *     .maximumWeight(1_000_000)
+     *     .weigher((key, value) -> key.length() + value.length())
+     *     .build();
+     * }</pre>
+     *
+     * @param <K1> the key type of the weigher
+     * @param <V1> the value type of the weigher
+     * @param weigher the weigher to use in calculating the weight of cache entries
+     * @return this builder instance, with type parameters adjusted to match the weigher
+     * @throws IllegalArgumentException if {@code weigher} is null
+     * @throws IllegalStateException if a weigher was already set
+     * @see #maximumWeight(long)
+     * @see Weigher
+     */
+    public <K1 extends K, V1 extends V> CacheBuilder<K1, V1> weigher(
+            Weigher<? super K1, ? super V1> weigher) {
+        if (weigher == null) {
+            throw new NullPointerException("weigher cannot be null");
+        }
+        if (this.weigher != null) {
+            throw new IllegalStateException("weigher was already set");
+        }
+
+        @SuppressWarnings("unchecked")
+        CacheBuilder<K1, V1> me = (CacheBuilder<K1, V1>) this;
+        me.weigher = weigher;
+        return me;
     }
 
     /**
@@ -375,6 +463,14 @@ public class CacheBuilder<K, V> {
 
     public long getMaximumSize() {
         return maximumSize;
+    }
+
+    public long getMaximumWeight() {
+        return maximumWeight;
+    }
+
+    public Weigher<? super K, ? super V> getWeigher() {
+        return weigher;
     }
 
     public long getExpireAfterWriteNanos() {

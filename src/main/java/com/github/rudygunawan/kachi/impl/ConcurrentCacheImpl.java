@@ -4,6 +4,7 @@ import com.github.rudygunawan.kachi.api.CacheLoader;
 import com.github.rudygunawan.kachi.api.Expiry;
 import com.github.rudygunawan.kachi.api.LoadingCache;
 import com.github.rudygunawan.kachi.api.RefreshPolicy;
+import com.github.rudygunawan.kachi.api.Weigher;
 import com.github.rudygunawan.kachi.builder.CacheBuilder;
 import com.github.rudygunawan.kachi.listener.RemovalListener;
 import com.github.rudygunawan.kachi.metrics.CacheMetrics;
@@ -51,6 +52,8 @@ public class ConcurrentCacheImpl<K, V> implements LoadingCache<K, V>, CacheMetri
     private final ConcurrentHashMap<K, CacheEntry<V>> storage;
     private final CacheLoader<? super K, V> loader;
     private final long maximumSize;
+    private final long maximumWeight;
+    private final Weigher<? super K, ? super V> weigher;
     private final long expireAfterWriteNanos;
     private final long expireAfterAccessNanos;
     private final boolean recordStats;
@@ -67,6 +70,7 @@ public class ConcurrentCacheImpl<K, V> implements LoadingCache<K, V>, CacheMetri
     private final AtomicLong loadFailureCount = new AtomicLong(0);
     private final AtomicLong totalLoadTime = new AtomicLong(0);
     private final AtomicLong evictionCount = new AtomicLong(0);
+    private final AtomicLong currentWeight = new AtomicLong(0);
 
     // Eviction tracking - different for each policy
     private final ConcurrentLinkedDeque<K> accessOrder = new ConcurrentLinkedDeque<>(); // For LRU and FIFO
@@ -113,6 +117,8 @@ public class ConcurrentCacheImpl<K, V> implements LoadingCache<K, V>, CacheMetri
         this.storage = new ConcurrentHashMap<>(builder.getInitialCapacity(), 0.75f, builder.getConcurrencyLevel());
         this.loader = loader;
         this.maximumSize = builder.getMaximumSize();
+        this.maximumWeight = builder.getMaximumWeight();
+        this.weigher = (Weigher<? super K, ? super V>) builder.getWeigher();
         this.expireAfterWriteNanos = builder.getExpireAfterWriteNanos();
         this.expireAfterAccessNanos = builder.getExpireAfterAccessNanos();
         this.recordStats = builder.isRecordingStats();
@@ -221,6 +227,8 @@ public class ConcurrentCacheImpl<K, V> implements LoadingCache<K, V>, CacheMetri
                     entry = storage.get(key);
                     if (entry != null && isExpired(entry)) {
                         storage.remove(key);
+                        // Subtract the expired entry's weight
+                        currentWeight.addAndGet(-entry.getWeight());
                         removeFromEvictionQueues(key);
                         fireRemovalEvent(key, entry.getValue(), RemovalCause.EXPIRED);
                         if (recordStats) {
@@ -468,11 +476,19 @@ public class ConcurrentCacheImpl<K, V> implements LoadingCache<K, V>, CacheMetri
     private void putInternal(K key, V value, RemovalCause replacementCause) {
         CacheEntry<V> oldEntry = storage.get(key);
         long ttl = getTtlForEntry(key, value, oldEntry);
-        CacheEntry<V> newEntry = new CacheEntry<>(value, ttl);
+
+        // Calculate weight for this entry
+        int weight = calculateWeight(key, value);
+        CacheEntry<V> newEntry = new CacheEntry<>(value, ttl, weight);
 
         oldEntry = storage.put(key, newEntry);
         if (oldEntry != null) {
+            // Subtract old entry weight and add new entry weight
+            currentWeight.addAndGet(weight - oldEntry.getWeight());
             fireRemovalEvent(key, oldEntry.getValue(), replacementCause);
+        } else {
+            // New entry, just add its weight
+            currentWeight.addAndGet(weight);
         }
 
         updateAccessTracking(key);
@@ -496,6 +512,8 @@ public class ConcurrentCacheImpl<K, V> implements LoadingCache<K, V>, CacheMetri
         try {
             CacheEntry<V> removed = storage.remove(key);
             if (removed != null) {
+                // Subtract the removed entry's weight
+                currentWeight.addAndGet(-removed.getWeight());
                 removeFromEvictionQueues(key);
                 fireRemovalEvent(key, removed.getValue(), RemovalCause.EXPLICIT);
             }
@@ -550,6 +568,8 @@ public class ConcurrentCacheImpl<K, V> implements LoadingCache<K, V>, CacheMetri
                 CacheEntry<V> entry = storage.get(key);
                 if (entry != null && isExpired(entry)) {
                     storage.remove(key);
+                    // Subtract the expired entry's weight
+                    currentWeight.addAndGet(-entry.getWeight());
                     removeFromEvictionQueues(key);
                     fireRemovalEvent(key, entry.getValue(), RemovalCause.EXPIRED);
                     if (recordStats) evictionCount.incrementAndGet();
@@ -625,8 +645,31 @@ public class ConcurrentCacheImpl<K, V> implements LoadingCache<K, V>, CacheMetri
         return 0;
     }
 
+    /**
+     * Calculates the weight of an entry using the weigher if configured, or returns 1.
+     *
+     * @param key the key being stored
+     * @param value the value being stored
+     * @return the weight of the entry (minimum 1)
+     */
+    private int calculateWeight(K key, V value) {
+        if (weigher != null) {
+            try {
+                int weight = weigher.weigh(key, value);
+                // Ensure weight is at least 1 (protect against bad weigher implementations)
+                return Math.max(1, weight);
+            } catch (Exception e) {
+                // If weigher throws exception, log and fall back to weight of 1
+                LOGGER.log(Level.WARNING, "Error in weigher for key: " + key +
+                          ", falling back to weight of 1", e);
+                return 1;
+            }
+        }
+        return 1;
+    }
+
     private void updateAccessTracking(K key) {
-        if (maximumSize <= 0) {
+        if (maximumSize <= 0 && maximumWeight <= 0) {
             return;
         }
 
@@ -691,11 +734,15 @@ public class ConcurrentCacheImpl<K, V> implements LoadingCache<K, V>, CacheMetri
     }
 
     private void evictIfNecessary() {
-        if (maximumSize <= 0) {
+        if (maximumSize <= 0 && maximumWeight <= 0) {
             return;
         }
 
-        while (storage.size() > maximumSize) {
+        // Check both size and weight constraints
+        int failedAttempts = 0;
+        int maxFailedAttempts = 10; // Prevent infinite loops
+        while ((maximumSize > 0 && storage.size() > maximumSize) ||
+               (maximumWeight > 0 && currentWeight.get() > maximumWeight)) {
             K keyToEvict = selectKeyToEvict();
             if (keyToEvict == null) {
                 break;
@@ -706,16 +753,27 @@ public class ConcurrentCacheImpl<K, V> implements LoadingCache<K, V>, CacheMetri
                 try {
                     CacheEntry<V> removed = storage.remove(keyToEvict);
                     if (removed != null) {
+                        // Subtract the evicted entry's weight
+                        currentWeight.addAndGet(-removed.getWeight());
                         removeFromEvictionQueues(keyToEvict);
                         fireRemovalEvent(keyToEvict, removed.getValue(), RemovalCause.SIZE);
                         if (recordStats) evictionCount.incrementAndGet();
                         if (LOGGER.isLoggable(Level.FINE)) {
-                            LOGGER.fine("Evicted entry due to size limit: key=" + keyToEvict +
-                                       ", policy=" + evictionPolicy + ", size=" + storage.size());
+                            LOGGER.fine("Evicted entry due to size/weight limit: key=" + keyToEvict +
+                                       ", policy=" + evictionPolicy + ", size=" + storage.size() +
+                                       ", weight=" + currentWeight.get());
                         }
+                        failedAttempts = 0; // Reset on successful eviction
                     }
                 } finally {
                     lock.writeLock().unlock();
+                }
+            } else {
+                // Couldn't acquire lock, increment failed attempts
+                failedAttempts++;
+                if (failedAttempts >= maxFailedAttempts) {
+                    // Give up to prevent infinite loop
+                    break;
                 }
             }
         }
@@ -737,12 +795,15 @@ public class ConcurrentCacheImpl<K, V> implements LoadingCache<K, V>, CacheMetri
 
     /**
      * Selects a key from the access order deque that is eligible for eviction.
-     * Entries must be at least 1 minute old to be evicted.
+     * Entries must be at least 1 second old to be evicted.
      */
     private K selectFromAccessOrder() {
         // Poll from deque and check eligibility
+        int attempts = 0;
+        int maxAttempts = accessOrder.size();
         K key;
-        while ((key = accessOrder.poll()) != null) {
+        while ((key = accessOrder.poll()) != null && attempts < maxAttempts) {
+            attempts++;
             CacheEntry<V> entry = storage.get(key);
             if (entry != null && entry.isEligibleForEviction()) {
                 return key;
@@ -757,7 +818,7 @@ public class ConcurrentCacheImpl<K, V> implements LoadingCache<K, V>, CacheMetri
 
     /**
      * Selects the least frequently used entry that is eligible for eviction.
-     * Entries must be at least 1 minute old to be evicted.
+     * Entries must be at least 1 second old to be evicted.
      */
     private K selectLFUCandidate() {
         K candidate = null;
