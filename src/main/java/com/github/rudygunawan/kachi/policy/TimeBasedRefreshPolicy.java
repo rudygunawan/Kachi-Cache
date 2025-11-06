@@ -18,77 +18,43 @@ import java.util.concurrent.TimeUnit;
  *   <li>Regional content (different refresh rates based on local time zones)
  * </ul>
  *
- * <p>Usage example for stock market data:
+ * <p><b>New API (recommended):</b> Use builder pattern for cleaner code:
  * <pre>{@code
+ * // Singapore Stock Exchange: 9-12, lunch break, 13-16
+ * TimeWindow morningSession = TimeWindow.builder()
+ *     .startTime(9, 0)
+ *     .endTime(12, 0)
+ *     .refreshEvery(10, TimeUnit.SECONDS)
+ *     .build();
+ *
+ * TimeWindow afternoonSession = TimeWindow.builder()
+ *     .startTime(13, 0)
+ *     .endTime(16, 0)
+ *     .refreshEvery(10, TimeUnit.SECONDS)
+ *     .build();
+ *
+ * List<TimeWindow> activeWindows = Arrays.asList(morningSession, afternoonSession);
+ *
  * TimeBasedRefreshPolicy<String, StockPrice> policy =
- *     new TimeBasedRefreshPolicy<>(ZoneId.of("America/New_York"))
- *         .addActiveWindow(9, 30, 16, 0, 1, TimeUnit.MINUTES)  // 9:30am-4pm: refresh every minute
- *         .setDefaultInterval(10, TimeUnit.MINUTES);            // After hours: refresh every 10 min
+ *     new TimeBasedRefreshPolicy<>(ZoneId.of("Asia/Singapore"), activeWindows, 30, TimeUnit.SECONDS);
  *
  * LoadingCache<String, StockPrice> cache = CacheBuilder.newBuilder()
  *     .refreshAfter(policy)
  *     .build(ticker -> loadStockPrice(ticker));
  * }</pre>
  *
+ * <p><b>Legacy API:</b> Fluent API still supported:
+ * <pre>{@code
+ * TimeBasedRefreshPolicy<String, StockPrice> policy =
+ *     new TimeBasedRefreshPolicy<>(ZoneId.of("America/New_York"))
+ *         .addActiveWindow(9, 30, 16, 0, 1, TimeUnit.MINUTES)
+ *         .setDefaultInterval(10, TimeUnit.MINUTES);
+ * }</pre>
+ *
  * @param <K> the type of keys
  * @param <V> the type of values
  */
 public class TimeBasedRefreshPolicy<K, V> implements RefreshPolicy<K, V> {
-
-    /**
-     * Represents a time window with a specific refresh interval.
-     */
-    public static class TimeWindow {
-        private final int startHour;
-        private final int startMinute;
-        private final int endHour;
-        private final int endMinute;
-        private final long intervalNanos;
-
-        public TimeWindow(int startHour, int startMinute, int endHour, int endMinute,
-                         long interval, TimeUnit unit) {
-            if (startHour < 0 || startHour > 23 || endHour < 0 || endHour > 23) {
-                throw new IllegalArgumentException("Hours must be between 0 and 23");
-            }
-            if (startMinute < 0 || startMinute > 59 || endMinute < 0 || endMinute > 59) {
-                throw new IllegalArgumentException("Minutes must be between 0 and 59");
-            }
-            if (interval <= 0) {
-                throw new IllegalArgumentException("Interval must be positive");
-            }
-
-            this.startHour = startHour;
-            this.startMinute = startMinute;
-            this.endHour = endHour;
-            this.endMinute = endMinute;
-            this.intervalNanos = unit.toNanos(interval);
-        }
-
-        /**
-         * Checks if the given time falls within this window.
-         */
-        public boolean contains(LocalTime time) {
-            LocalTime start = LocalTime.of(startHour, startMinute);
-            LocalTime end = LocalTime.of(endHour, endMinute);
-
-            // Handle windows that cross midnight
-            if (end.isBefore(start)) {
-                return !time.isBefore(start) || !time.isAfter(end);
-            } else {
-                return !time.isBefore(start) && !time.isAfter(end);
-            }
-        }
-
-        public long getIntervalNanos() {
-            return intervalNanos;
-        }
-
-        @Override
-        public String toString() {
-            return String.format("%02d:%02d-%02d:%02d (%d ns)",
-                    startHour, startMinute, endHour, endMinute, intervalNanos);
-        }
-    }
 
     private final ZoneId timeZone;
     private final List<TimeWindow> windows;
@@ -103,6 +69,7 @@ public class TimeBasedRefreshPolicy<K, V> implements RefreshPolicy<K, V> {
 
     /**
      * Creates a new time-based refresh policy using the specified time zone.
+     * Use this constructor with the fluent API (addActiveWindow, setDefaultInterval).
      *
      * @param timeZone the time zone to use for time-based decisions
      */
@@ -113,8 +80,91 @@ public class TimeBasedRefreshPolicy<K, V> implements RefreshPolicy<K, V> {
     }
 
     /**
+     * Creates a new time-based refresh policy with a list of active windows.
+     * This is the recommended constructor for the new API.
+     *
+     * <p>Example (Singapore Stock Exchange):
+     * <pre>{@code
+     * TimeWindow morning = TimeWindow.builder()
+     *     .startTime(9, 0).endTime(12, 0).refreshEvery(10, TimeUnit.SECONDS).build();
+     * TimeWindow afternoon = TimeWindow.builder()
+     *     .startTime(13, 0).endTime(16, 0).refreshEvery(10, TimeUnit.SECONDS).build();
+     *
+     * TimeBasedRefreshPolicy<String, StockPrice> policy =
+     *     new TimeBasedRefreshPolicy<>(
+     *         ZoneId.of("Asia/Singapore"),
+     *         Arrays.asList(morning, afternoon),
+     *         30, TimeUnit.SECONDS  // default interval (after hours)
+     *     );
+     * }</pre>
+     *
+     * @param timeZone the time zone to use for time-based decisions
+     * @param windows the list of active time windows (must not be null or empty)
+     * @param defaultInterval the default refresh interval outside active windows
+     * @param defaultUnit the time unit for the default interval
+     * @throws IllegalArgumentException if windows is null, empty, or contains overlapping windows
+     */
+    public TimeBasedRefreshPolicy(ZoneId timeZone, List<TimeWindow> windows,
+                                   long defaultInterval, TimeUnit defaultUnit) {
+        if (windows == null || windows.isEmpty()) {
+            throw new IllegalArgumentException("Active windows list must not be null or empty");
+        }
+        if (defaultInterval <= 0) {
+            throw new IllegalArgumentException("Default interval must be positive, got: " + defaultInterval);
+        }
+
+        this.timeZone = timeZone;
+        this.windows = new ArrayList<>(windows); // Make defensive copy
+        this.defaultIntervalNanos = defaultUnit.toNanos(defaultInterval);
+
+        // Validate that no windows overlap
+        validateNoOverlaps();
+    }
+
+    /**
+     * Creates a new time-based refresh policy with a list of active windows (no default refresh).
+     * Outside the defined windows, refresh is disabled.
+     *
+     * @param timeZone the time zone to use for time-based decisions
+     * @param windows the list of active time windows (must not be null or empty)
+     * @throws IllegalArgumentException if windows is null, empty, or contains overlapping windows
+     */
+    public TimeBasedRefreshPolicy(ZoneId timeZone, List<TimeWindow> windows) {
+        if (windows == null || windows.isEmpty()) {
+            throw new IllegalArgumentException("Active windows list must not be null or empty");
+        }
+
+        this.timeZone = timeZone;
+        this.windows = new ArrayList<>(windows); // Make defensive copy
+        this.defaultIntervalNanos = Long.MAX_VALUE; // No refresh by default
+
+        // Validate that no windows overlap
+        validateNoOverlaps();
+    }
+
+    /**
+     * Validates that no time windows overlap with each other.
+     * @throws IllegalArgumentException if any two windows overlap
+     */
+    private void validateNoOverlaps() {
+        for (int i = 0; i < windows.size(); i++) {
+            for (int j = i + 1; j < windows.size(); j++) {
+                TimeWindow window1 = windows.get(i);
+                TimeWindow window2 = windows.get(j);
+                if (window1.overlaps(window2)) {
+                    throw new IllegalArgumentException(
+                        String.format("Time windows overlap: %s and %s",
+                            window1, window2));
+                }
+            }
+        }
+    }
+
+    /**
      * Adds a time window during which entries should be refreshed at the specified interval.
      * Time windows are checked in the order they are added. The first matching window is used.
+     *
+     * <p><b>Note:</b> This method validates that the new window doesn't overlap with existing windows.
      *
      * @param startHour the start hour (0-23)
      * @param startMinute the start minute (0-59)
@@ -123,11 +173,29 @@ public class TimeBasedRefreshPolicy<K, V> implements RefreshPolicy<K, V> {
      * @param interval the refresh interval
      * @param unit the time unit for the interval
      * @return this policy instance for chaining
+     * @throws IllegalArgumentException if the new window overlaps with any existing window
+     * @deprecated Use the constructor with List<TimeWindow> for better validation
      */
+    @Deprecated
     public TimeBasedRefreshPolicy<K, V> addActiveWindow(int startHour, int startMinute,
                                                          int endHour, int endMinute,
                                                          long interval, TimeUnit unit) {
-        windows.add(new TimeWindow(startHour, startMinute, endHour, endMinute, interval, unit));
+        TimeWindow newWindow = TimeWindow.builder()
+            .startTime(startHour, startMinute)
+            .endTime(endHour, endMinute)
+            .refreshEvery(interval, unit)
+            .build();
+
+        // Check for overlaps with existing windows
+        for (TimeWindow existing : windows) {
+            if (existing.overlaps(newWindow)) {
+                throw new IllegalArgumentException(
+                    String.format("New window %s overlaps with existing window %s",
+                        newWindow, existing));
+            }
+        }
+
+        windows.add(newWindow);
         return this;
     }
 
