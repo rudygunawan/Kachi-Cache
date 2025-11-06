@@ -1,4 +1,4 @@
-package com.github.rudy.kachi;
+package com.github.rudygunawan.kachi.policy;
 
 /**
  * The reason why a cached entry was removed.

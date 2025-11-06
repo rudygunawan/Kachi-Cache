@@ -1,4 +1,6 @@
-package com.github.rudy.kachi;
+package com.github.rudygunawan.kachi.api;
+
+import com.github.rudygunawan.kachi.model.CacheStats;
 
 import java.util.Map;
 import java.util.concurrent.Callable;

@@ -1,4 +1,15 @@
-package com.github.rudy.kachi;
+package com.github.rudygunawan.kachi.impl;
+
+import com.github.rudygunawan.kachi.api.CacheLoader;
+import com.github.rudygunawan.kachi.api.LoadingCache;
+import com.github.rudygunawan.kachi.builder.CacheBuilder;
+import com.github.rudygunawan.kachi.listener.RemovalListener;
+import com.github.rudygunawan.kachi.metrics.CacheMetrics;
+import com.github.rudygunawan.kachi.metrics.ExpiryDistribution;
+import com.github.rudygunawan.kachi.model.CacheEntry;
+import com.github.rudygunawan.kachi.model.CacheStats;
+import com.github.rudygunawan.kachi.policy.EvictionPolicy;
+import com.github.rudygunawan.kachi.policy.RemovalCause;
 
 import java.util.*;
 import java.util.concurrent.*;
@@ -12,7 +23,7 @@ import java.util.concurrent.locks.ReentrantReadWriteLock;
  * @param <K> the type of keys
  * @param <V> the type of values
  */
-class ConcurrentCacheImpl<K, V> implements LoadingCache<K, V>, CacheMetrics {
+public class ConcurrentCacheImpl<K, V> implements LoadingCache<K, V>, CacheMetrics {
     // Idle threshold - entries not accessed in last 5 minutes are considered idle
     private static final long IDLE_THRESHOLD_NANOS = 5L * 60 * 1_000_000_000; // 5 minutes
     private final ConcurrentHashMap<K, CacheEntry<V>> storage;
@@ -49,7 +60,7 @@ class ConcurrentCacheImpl<K, V> implements LoadingCache<K, V>, CacheMetrics {
     /**
      * Constructor for non-loading cache.
      */
-    ConcurrentCacheImpl(CacheBuilder<?, ?> builder) {
+    public ConcurrentCacheImpl(CacheBuilder<?, ?> builder) {
         this(builder, null);
     }
 
@@ -57,7 +68,7 @@ class ConcurrentCacheImpl<K, V> implements LoadingCache<K, V>, CacheMetrics {
      * Constructor for loading cache.
      */
     @SuppressWarnings("unchecked")
-    ConcurrentCacheImpl(CacheBuilder<?, ?> builder, CacheLoader<? super K, V> loader) {
+    public ConcurrentCacheImpl(CacheBuilder<?, ?> builder, CacheLoader<? super K, V> loader) {
         this.storage = new ConcurrentHashMap<>(builder.getInitialCapacity(), 0.75f, builder.getConcurrencyLevel());
         this.loader = loader;
         this.maximumSize = builder.getMaximumSize();
@@ -690,5 +701,66 @@ class ConcurrentCacheImpl<K, V> implements LoadingCache<K, V>, CacheMetrics {
         long averageKeyValueSize = 100;
 
         return entryCount * (perEntryOverhead + averageKeyValueSize);
+    }
+
+    @Override
+    public long averageEntrySizeBytes() {
+        long entryCount = storage.size();
+        if (entryCount == 0) {
+            return 0;
+        }
+        return estimatedMemoryUsageBytes() / entryCount;
+    }
+
+    @Override
+    public ExpiryDistribution expiryDistribution() {
+        long now = System.nanoTime();
+
+        long lessThan1Min = 0;
+        long lessThan5Min = 0;
+        long lessThan15Min = 0;
+        long lessThan1Hour = 0;
+        long lessThan24Hours = 0;
+        long moreThan24Hours = 0;
+        long neverExpires = 0;
+
+        for (CacheEntry<V> entry : storage.values()) {
+            long expirationTime = entry.getExpirationTime();
+
+            // Check if entry never expires
+            if (expirationTime == Long.MAX_VALUE) {
+                neverExpires++;
+                continue;
+            }
+
+            long timeUntilExpiry = expirationTime - now;
+
+            // Entry already expired
+            if (timeUntilExpiry <= 0) {
+                lessThan1Min++;
+            } else if (timeUntilExpiry < 60_000_000_000L) { // < 1 minute
+                lessThan1Min++;
+            } else if (timeUntilExpiry < 5 * 60_000_000_000L) { // < 5 minutes
+                lessThan5Min++;
+            } else if (timeUntilExpiry < 15 * 60_000_000_000L) { // < 15 minutes
+                lessThan15Min++;
+            } else if (timeUntilExpiry < 60 * 60_000_000_000L) { // < 1 hour
+                lessThan1Hour++;
+            } else if (timeUntilExpiry < 24 * 60 * 60_000_000_000L) { // < 24 hours
+                lessThan24Hours++;
+            } else { // > 24 hours
+                moreThan24Hours++;
+            }
+        }
+
+        return new ExpiryDistribution(
+                lessThan1Min,
+                lessThan5Min,
+                lessThan15Min,
+                lessThan1Hour,
+                lessThan24Hours,
+                moreThan24Hours,
+                neverExpires
+        );
     }
 }

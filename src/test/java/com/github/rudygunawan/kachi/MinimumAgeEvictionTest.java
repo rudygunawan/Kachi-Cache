@@ -1,4 +1,10 @@
-package com.github.rudy.kachi;
+package com.github.rudygunawan.kachi;
+
+import com.github.rudygunawan.kachi.api.Cache;
+import com.github.rudygunawan.kachi.builder.CacheBuilder;
+import com.github.rudygunawan.kachi.listener.RemovalListener;
+import com.github.rudygunawan.kachi.policy.EvictionPolicy;
+import com.github.rudygunawan.kachi.policy.RemovalCause;
 
 import org.junit.jupiter.api.Test;
 import java.util.ArrayList;

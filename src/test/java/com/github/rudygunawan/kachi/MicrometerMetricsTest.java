@@ -1,4 +1,8 @@
-package com.github.rudy.kachi;
+package com.github.rudygunawan.kachi;
+
+import com.github.rudygunawan.kachi.builder.CacheBuilder;
+import com.github.rudygunawan.kachi.impl.ConcurrentCacheImpl;
+import com.github.rudygunawan.kachi.metrics.MicrometerCacheMetrics;
 
 import io.micrometer.core.instrument.*;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;

@@ -1,4 +1,6 @@
-package com.github.rudy.kachi;
+package com.github.rudygunawan.kachi.metrics;
+
+import com.github.rudygunawan.kachi.api.Cache;
 
 import io.micrometer.core.instrument.*;
 import io.micrometer.core.instrument.binder.MeterBinder;
@@ -20,6 +22,16 @@ import java.util.Collections;
  *   <li>cache.hit.ratio - Cache hit rate (0.0 to 1.0)
  *   <li>cache.idle.entries - Number of idle entries (not accessed recently)
  *   <li>cache.memory.estimated - Estimated memory usage in bytes
+ *   <li>cache.entry.size.average - Average size of each cache entry in bytes
+ *   <li>cache.size.mb - Cache size in megabytes
+ *   <li>cache.size.gb - Cache size in gigabytes
+ *   <li>cache.expiry.less_than_1min - Entries expiring in < 1 minute
+ *   <li>cache.expiry.less_than_5min - Entries expiring in < 5 minutes
+ *   <li>cache.expiry.less_than_15min - Entries expiring in < 15 minutes
+ *   <li>cache.expiry.less_than_1hour - Entries expiring in < 1 hour
+ *   <li>cache.expiry.less_than_24hours - Entries expiring in < 24 hours
+ *   <li>cache.expiry.more_than_24hours - Entries expiring in > 24 hours
+ *   <li>cache.expiry.never - Entries that never expire
  * </ul>
  *
  * <p>Usage example:
@@ -157,6 +169,70 @@ public class MicrometerCacheMetrics implements MeterBinder {
                 .tags(allTags)
                 .baseUnit("bytes")
                 .description("Estimated memory usage of the cache")
+                .register(registry);
+
+        // Average entry size
+        Gauge.builder("cache.entry.size.average", cache, CacheMetrics::averageEntrySizeBytes)
+                .tags(allTags)
+                .baseUnit("bytes")
+                .description("Average size of each cache entry in bytes")
+                .register(registry);
+
+        // Cache size in MB
+        Gauge.builder("cache.size.mb", cache, CacheMetrics::cacheSizeMB)
+                .tags(allTags)
+                .baseUnit("megabytes")
+                .description("Cache size in megabytes")
+                .register(registry);
+
+        // Cache size in GB
+        Gauge.builder("cache.size.gb", cache, CacheMetrics::cacheSizeGB)
+                .tags(allTags)
+                .baseUnit("gigabytes")
+                .description("Cache size in gigabytes")
+                .register(registry);
+
+        // Expiry distribution - breakdown by time windows
+        Gauge.builder("cache.expiry.less_than_1min", cache,
+                        c -> c.expiryDistribution().getLessThan1Minute())
+                .tags(allTags)
+                .description("Number of entries expiring in less than 1 minute")
+                .register(registry);
+
+        Gauge.builder("cache.expiry.less_than_5min", cache,
+                        c -> c.expiryDistribution().getLessThan5Minutes())
+                .tags(allTags)
+                .description("Number of entries expiring in less than 5 minutes")
+                .register(registry);
+
+        Gauge.builder("cache.expiry.less_than_15min", cache,
+                        c -> c.expiryDistribution().getLessThan15Minutes())
+                .tags(allTags)
+                .description("Number of entries expiring in less than 15 minutes")
+                .register(registry);
+
+        Gauge.builder("cache.expiry.less_than_1hour", cache,
+                        c -> c.expiryDistribution().getLessThan1Hour())
+                .tags(allTags)
+                .description("Number of entries expiring in less than 1 hour")
+                .register(registry);
+
+        Gauge.builder("cache.expiry.less_than_24hours", cache,
+                        c -> c.expiryDistribution().getLessThan24Hours())
+                .tags(allTags)
+                .description("Number of entries expiring in less than 24 hours")
+                .register(registry);
+
+        Gauge.builder("cache.expiry.more_than_24hours", cache,
+                        c -> c.expiryDistribution().getMoreThan24Hours())
+                .tags(allTags)
+                .description("Number of entries expiring in more than 24 hours")
+                .register(registry);
+
+        Gauge.builder("cache.expiry.never", cache,
+                        c -> c.expiryDistribution().getNeverExpires())
+                .tags(allTags)
+                .description("Number of entries that never expire")
                 .register(registry);
     }
 }

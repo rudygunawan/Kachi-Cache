@@ -1,4 +1,4 @@
-package com.github.rudy.kachi;
+package com.github.rudygunawan.kachi.api;
 
 /**
  * Computes or retrieves values, based on a key, for use in populating a {@link LoadingCache}.

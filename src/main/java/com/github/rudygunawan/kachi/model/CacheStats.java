@@ -1,4 +1,4 @@
-package com.github.rudy.kachi;
+package com.github.rudygunawan.kachi.model;
 
 import java.util.Objects;
 

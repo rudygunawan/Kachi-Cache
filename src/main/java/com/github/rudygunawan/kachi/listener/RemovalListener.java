@@ -1,4 +1,6 @@
-package com.github.rudy.kachi;
+package com.github.rudygunawan.kachi.listener;
+
+import com.github.rudygunawan.kachi.policy.RemovalCause;
 
 /**
  * A listener that receives notification when an entry is removed from a cache.

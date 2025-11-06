@@ -1,4 +1,10 @@
-package com.github.rudy.kachi;
+package com.github.rudygunawan.kachi;
+
+import com.github.rudygunawan.kachi.api.Cache;
+import com.github.rudygunawan.kachi.api.CacheLoader;
+import com.github.rudygunawan.kachi.api.LoadingCache;
+import com.github.rudygunawan.kachi.builder.CacheBuilder;
+import com.github.rudygunawan.kachi.model.CacheStats;
 
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;

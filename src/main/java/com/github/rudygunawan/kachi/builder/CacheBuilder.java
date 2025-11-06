@@ -1,4 +1,11 @@
-package com.github.rudy.kachi;
+package com.github.rudygunawan.kachi.builder;
+
+import com.github.rudygunawan.kachi.api.Cache;
+import com.github.rudygunawan.kachi.api.CacheLoader;
+import com.github.rudygunawan.kachi.api.LoadingCache;
+import com.github.rudygunawan.kachi.impl.ConcurrentCacheImpl;
+import com.github.rudygunawan.kachi.listener.RemovalListener;
+import com.github.rudygunawan.kachi.policy.EvictionPolicy;
 
 import java.util.concurrent.TimeUnit;
 
@@ -225,7 +232,7 @@ public class CacheBuilder<K, V> {
      * @return a cache having the requested features
      */
     public <K1 extends K, V1 extends V> Cache<K1, V1> build() {
-        return new ConcurrentCacheImpl<>(this);
+        return new ConcurrentCacheImpl<K1, V1>(this);
     }
 
     /**
@@ -238,39 +245,39 @@ public class CacheBuilder<K, V> {
      * @return a cache having the requested features
      */
     public <K1 extends K, V1 extends V> LoadingCache<K1, V1> build(CacheLoader<? super K1, V1> loader) {
-        return new ConcurrentCacheImpl<>(this, loader);
+        return new ConcurrentCacheImpl<K1, V1>(this, loader);
     }
 
     // Package-private getters for ConcurrentCacheImpl
-    int getInitialCapacity() {
+    public int getInitialCapacity() {
         return initialCapacity;
     }
 
-    int getConcurrencyLevel() {
+    public int getConcurrencyLevel() {
         return concurrencyLevel;
     }
 
-    long getMaximumSize() {
+    public long getMaximumSize() {
         return maximumSize;
     }
 
-    long getExpireAfterWriteNanos() {
+    public long getExpireAfterWriteNanos() {
         return expireAfterWriteNanos;
     }
 
-    long getExpireAfterAccessNanos() {
+    public long getExpireAfterAccessNanos() {
         return expireAfterAccessNanos;
     }
 
-    boolean isRecordingStats() {
+    public boolean isRecordingStats() {
         return recordStats;
     }
 
-    EvictionPolicy getEvictionPolicy() {
+    public EvictionPolicy getEvictionPolicy() {
         return evictionPolicy;
     }
 
-    RemovalListener<? super K, ? super V> getRemovalListener() {
+    public RemovalListener<? super K, ? super V> getRemovalListener() {
         return removalListener;
     }
 }

@@ -1,6 +1,13 @@
-package com.github.rudy.kachi.example;
+package com.github.rudygunawan.kachi.example;
 
-import com.github.rudy.kachi.*;
+import com.github.rudygunawan.kachi.api.Cache;
+import com.github.rudygunawan.kachi.api.CacheLoader;
+import com.github.rudygunawan.kachi.api.LoadingCache;
+import com.github.rudygunawan.kachi.builder.CacheBuilder;
+import com.github.rudygunawan.kachi.listener.RemovalListener;
+import com.github.rudygunawan.kachi.model.CacheStats;
+import com.github.rudygunawan.kachi.policy.EvictionPolicy;
+import com.github.rudygunawan.kachi.policy.RemovalCause;
 
 import java.util.concurrent.TimeUnit;
 

@@ -1,10 +1,10 @@
-package com.github.rudy.kachi;
+package com.github.rudygunawan.kachi.metrics;
 
 /**
  * Interface for cache implementations to provide metrics data.
  * This is used by MicrometerCacheMetrics to collect and expose metrics.
  */
-interface CacheMetrics {
+public interface CacheMetrics {
 
     /**
      * Returns the current number of entries in the cache.
@@ -51,4 +51,32 @@ interface CacheMetrics {
      * Returns the estimated memory usage in bytes.
      */
     long estimatedMemoryUsageBytes();
+
+    /**
+     * Returns the average entry size in bytes.
+     * This is calculated as total estimated memory / number of entries.
+     */
+    long averageEntrySizeBytes();
+
+    /**
+     * Returns the cache size in megabytes.
+     * This is a convenience method that converts estimatedMemoryUsageBytes to MB.
+     */
+    default double cacheSizeMB() {
+        return estimatedMemoryUsageBytes() / (1024.0 * 1024.0);
+    }
+
+    /**
+     * Returns the cache size in gigabytes.
+     * This is a convenience method that converts estimatedMemoryUsageBytes to GB.
+     */
+    default double cacheSizeGB() {
+        return estimatedMemoryUsageBytes() / (1024.0 * 1024.0 * 1024.0);
+    }
+
+    /**
+     * Returns expiry distribution statistics.
+     * Provides a breakdown of entries by time until expiry.
+     */
+    ExpiryDistribution expiryDistribution();
 }

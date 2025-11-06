@@ -1,4 +1,4 @@
-package com.github.rudy.kachi;
+package com.github.rudygunawan.kachi.policy;
 
 /**
  * Eviction policy for determining which entries to remove when the cache reaches its maximum size.

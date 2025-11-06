@@ -1,4 +1,4 @@
-package com.github.rudy.kachi;
+package com.github.rudygunawan.kachi.model;
 
 import java.util.concurrent.atomic.AtomicLong;
 
@@ -7,7 +7,7 @@ import java.util.concurrent.atomic.AtomicLong;
  *
  * @param <V> the type of the cached value
  */
-class CacheEntry<V> {
+public class CacheEntry<V> {
     // Minimum time an entry must stay in cache before eligible for eviction (1 minute)
     private static final long MIN_EVICTION_AGE_NANOS = 60_000_000_000L; // 60 seconds
 
@@ -23,7 +23,7 @@ class CacheEntry<V> {
      * @param value the value to cache
      * @param ttlNanos the time-to-live in nanoseconds, or 0 for no expiration
      */
-    CacheEntry(V value, long ttlNanos) {
+    public CacheEntry(V value, long ttlNanos) {
         this.value = value;
         this.writeTime = System.nanoTime();
         this.expirationTime = ttlNanos > 0 ? writeTime + ttlNanos : Long.MAX_VALUE;
@@ -34,35 +34,35 @@ class CacheEntry<V> {
     /**
      * Returns the cached value.
      */
-    V getValue() {
+    public V getValue() {
         return value;
     }
 
     /**
      * Returns the time (in nanoseconds) when this entry was written.
      */
-    long getWriteTime() {
+    public long getWriteTime() {
         return writeTime;
     }
 
     /**
      * Returns the time (in nanoseconds) when this entry expires.
      */
-    long getExpirationTime() {
+    public long getExpirationTime() {
         return expirationTime;
     }
 
     /**
      * Returns the time (in nanoseconds) when this entry was last accessed.
      */
-    long getAccessTime() {
+    public long getAccessTime() {
         return accessTime.get();
     }
 
     /**
      * Updates the access time to the current time and increments access count.
      */
-    void updateAccessTime() {
+    public void updateAccessTime() {
         accessTime.set(System.nanoTime());
         accessCount.incrementAndGet();
     }
@@ -70,28 +70,28 @@ class CacheEntry<V> {
     /**
      * Returns the number of times this entry has been accessed.
      */
-    long getAccessCount() {
+    public long getAccessCount() {
         return accessCount.get();
     }
 
     /**
      * Returns true if this entry has expired.
      */
-    boolean isExpired() {
+    public boolean isExpired() {
         return System.nanoTime() >= expirationTime;
     }
 
     /**
      * Returns true if this entry has expired after the specified time.
      */
-    boolean isExpiredAfter(long timeNanos) {
+    public boolean isExpiredAfter(long timeNanos) {
         return timeNanos >= expirationTime;
     }
 
     /**
      * Returns the age of this entry in nanoseconds since it was written.
      */
-    long getAgeNanos() {
+    public long getAgeNanos() {
         return System.nanoTime() - writeTime;
     }
 
@@ -99,7 +99,7 @@ class CacheEntry<V> {
      * Returns true if this entry is old enough to be considered for eviction.
      * Entries must be at least 1 minute old before they can be evicted.
      */
-    boolean isEligibleForEviction() {
+    public boolean isEligibleForEviction() {
         return getAgeNanos() >= MIN_EVICTION_AGE_NANOS;
     }
 }
