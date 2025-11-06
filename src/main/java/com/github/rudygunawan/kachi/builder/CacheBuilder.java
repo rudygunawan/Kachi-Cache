@@ -2,6 +2,7 @@ package com.github.rudygunawan.kachi.builder;
 
 import com.github.rudygunawan.kachi.api.Cache;
 import com.github.rudygunawan.kachi.api.CacheLoader;
+import com.github.rudygunawan.kachi.api.Expiry;
 import com.github.rudygunawan.kachi.api.LoadingCache;
 import com.github.rudygunawan.kachi.impl.ConcurrentCacheImpl;
 import com.github.rudygunawan.kachi.listener.RemovalListener;
@@ -54,6 +55,7 @@ public class CacheBuilder<K, V> {
     private boolean recordStats = false;
     private EvictionPolicy evictionPolicy = EvictionPolicy.LRU;
     private RemovalListener<? super K, ? super V> removalListener;
+    private Expiry<? super K, ? super V> expiry;
 
     private CacheBuilder() {
     }
@@ -227,6 +229,48 @@ public class CacheBuilder<K, V> {
     }
 
     /**
+     * Specifies a custom expiration policy that determines how long each entry should be retained
+     * in the cache. This allows different entries to have different expiration times based on their
+     * key, value, or other application-specific logic.
+     *
+     * <p>When a custom {@link Expiry} is specified, it takes precedence over {@link #expireAfterWrite}
+     * and {@link #expireAfterAccess}. However, if both are specified, they will work together
+     * (the entry expires when either condition is met).
+     *
+     * <p><b>Note:</b> This is an advanced feature. For simple fixed TTL, use {@link #expireAfterWrite}
+     * or {@link #expireAfterAccess} instead.
+     *
+     * <p>Example usage:
+     * <pre>{@code
+     * Expiry<String, User> expiry = new Expiry<String, User>() {
+     *   public long expireAfterCreate(String key, User user, long currentTime) {
+     *     return user.isPremium()
+     *         ? TimeUnit.HOURS.toNanos(2)
+     *         : TimeUnit.MINUTES.toNanos(30);
+     *   }
+     *   // ... implement other methods
+     * };
+     *
+     * Cache<String, User> cache = CacheBuilder.newBuilder()
+     *     .expireAfter(expiry)
+     *     .build();
+     * }</pre>
+     *
+     * @param expiry the custom expiration policy
+     * @return this builder instance
+     */
+    public <K1 extends K, V1 extends V> CacheBuilder<K1, V1> expireAfter(
+            Expiry<? super K1, ? super V1> expiry) {
+        if (expiry == null) {
+            throw new NullPointerException("expiry cannot be null");
+        }
+        @SuppressWarnings("unchecked")
+        CacheBuilder<K1, V1> me = (CacheBuilder<K1, V1>) this;
+        me.expiry = expiry;
+        return me;
+    }
+
+    /**
      * Builds a cache which does not automatically load values when keys are requested.
      *
      * @return a cache having the requested features
@@ -279,5 +323,9 @@ public class CacheBuilder<K, V> {
 
     public RemovalListener<? super K, ? super V> getRemovalListener() {
         return removalListener;
+    }
+
+    public Expiry<? super K, ? super V> getExpiry() {
+        return expiry;
     }
 }

@@ -1,6 +1,7 @@
 package com.github.rudygunawan.kachi.impl;
 
 import com.github.rudygunawan.kachi.api.CacheLoader;
+import com.github.rudygunawan.kachi.api.Expiry;
 import com.github.rudygunawan.kachi.api.LoadingCache;
 import com.github.rudygunawan.kachi.builder.CacheBuilder;
 import com.github.rudygunawan.kachi.listener.RemovalListener;
@@ -34,6 +35,7 @@ public class ConcurrentCacheImpl<K, V> implements LoadingCache<K, V>, CacheMetri
     private final boolean recordStats;
     private final EvictionPolicy evictionPolicy;
     private final RemovalListener<? super K, ? super V> removalListener;
+    private final Expiry<? super K, ? super V> expiry;
 
     // Statistics
     private final AtomicLong hitCount = new AtomicLong(0);
@@ -77,9 +79,10 @@ public class ConcurrentCacheImpl<K, V> implements LoadingCache<K, V>, CacheMetri
         this.recordStats = builder.isRecordingStats();
         this.evictionPolicy = builder.getEvictionPolicy();
         this.removalListener = (RemovalListener<? super K, ? super V>) builder.getRemovalListener();
+        this.expiry = (Expiry<? super K, ? super V>) builder.getExpiry();
 
         // Start scheduled TTL cleanup task (runs every minute)
-        if (expireAfterWriteNanos > 0 || expireAfterAccessNanos > 0) {
+        if (expireAfterWriteNanos > 0 || expireAfterAccessNanos > 0 || expiry != null) {
             this.cleanupScheduler = Executors.newSingleThreadScheduledExecutor(r -> {
                 Thread t = new Thread(r, "kachi-cache-cleanup");
                 t.setDaemon(true);
@@ -379,10 +382,11 @@ public class ConcurrentCacheImpl<K, V> implements LoadingCache<K, V>, CacheMetri
      * Internal put method that must be called with write lock held.
      */
     private void putInternal(K key, V value, RemovalCause replacementCause) {
-        long ttl = getTtlForEntry();
+        CacheEntry<V> oldEntry = storage.get(key);
+        long ttl = getTtlForEntry(key, value, oldEntry);
         CacheEntry<V> newEntry = new CacheEntry<>(value, ttl);
 
-        CacheEntry<V> oldEntry = storage.put(key, newEntry);
+        oldEntry = storage.put(key, newEntry);
         if (oldEntry != null) {
             fireRemovalEvent(key, oldEntry.getValue(), replacementCause);
         }
@@ -500,7 +504,37 @@ public class ConcurrentCacheImpl<K, V> implements LoadingCache<K, V>, CacheMetri
         return false;
     }
 
-    private long getTtlForEntry() {
+    /**
+     * Gets the TTL for an entry. If custom expiry is configured, it is used.
+     * Otherwise, falls back to the fixed expireAfterWrite TTL.
+     *
+     * @param key the key being stored
+     * @param value the value being stored
+     * @param oldEntry the old entry if this is an update, null if this is a create
+     * @return the TTL in nanoseconds, or 0 for no expiration
+     */
+    private long getTtlForEntry(K key, V value, CacheEntry<V> oldEntry) {
+        long currentTime = System.nanoTime();
+
+        // If custom expiry is configured, use it
+        if (expiry != null) {
+            try {
+                if (oldEntry == null) {
+                    // This is a create operation
+                    return expiry.expireAfterCreate(key, value, currentTime);
+                } else {
+                    // This is an update operation
+                    long currentDuration = oldEntry.getExpirationTime() - oldEntry.getWriteTime();
+                    return expiry.expireAfterUpdate(key, value, currentTime, currentDuration);
+                }
+            } catch (Exception e) {
+                // If custom expiry throws an exception, log and fall back to default
+                // In a production environment, you might want to use a proper logger here
+                System.err.println("Error in custom expiry policy: " + e.getMessage());
+            }
+        }
+
+        // Fall back to fixed TTL
         if (expireAfterWriteNanos > 0) {
             return expireAfterWriteNanos;
         }
