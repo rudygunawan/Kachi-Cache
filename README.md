@@ -4,6 +4,10 @@
 
 A high-performance Java cache library inspired by Google Guava and Caffeine, with support for TTL (time-to-live), lazy loading, and excellent concurrent performance.
 
+
+<img src="/images/logo.png" alt="logo" width="300"/>
+
+
 ## About the Name
 
 **Kachi** (カチ) is a Japanese onomatopoeia that captures the essence of this library:
