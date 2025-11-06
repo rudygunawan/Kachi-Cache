@@ -43,6 +43,7 @@ In Japanese culture, onomatopoeia (擬音語 _giongo_) are deeply embedded in th
 - **Per-Entry Expiration**: Variable TTL where different entries can have different expiration times
 - **Lazy Loading**: Automatic value loading with `CacheLoader` for database/API integration
 - **Advanced Eviction Policies**: Window TinyLFU (near-optimal hit rates), LRU, LFU, or FIFO
+- **Weight-Based Eviction**: Control memory usage by entry weight (perfect for variable-size entries)
 - **Refresh Ahead**: Automatic background refresh with time-based policies (e.g., stock market hours)
 - **Removal Listeners**: Get notified when entries are removed with the reason (SIZE, EXPIRED, EXPLICIT, REPLACED)
 - **Scheduled TTL Cleanup**: Automatic background cleanup of expired entries every minute
@@ -50,6 +51,7 @@ In Japanese culture, onomatopoeia (擬音語 _giongo_) are deeply embedded in th
 - **Statistics**: Built-in performance metrics tracking (hit rate, miss rate, load times, etc.)
 - **Simple API**: Fluent builder pattern similar to Guava Cache
 - **Zero Dependencies**: Pure Java implementation with no external dependencies
+- **Configurable Logging**: Uses java.util.logging for zero-dependency, flexible log configuration
 
 ## Installation
 
@@ -395,9 +397,101 @@ Example benchmark showing TinyLFU advantages:
 ```
 
 **Minimum Age Protection:**
-All entries must remain in the cache for at least **1 minute** before they can be evicted due to size constraints. This prevents newly added entries from being immediately evicted, ensuring fair cache utilization. This protection applies to all eviction policies.
+All entries must remain in the cache for at least **1 second** before they can be evicted due to size constraints. This prevents newly added entries from being immediately evicted, ensuring fair cache utilization. This protection applies to all eviction policies.
 
 Note: Manual invalidation (`invalidate()`) and replacements (`put()` on existing key) are not affected by this minimum age requirement.
+
+### Weight-Based Eviction (Variable-Size Entries)
+
+For caches with variable-size entries (e.g., images, documents, large strings), use weight-based eviction instead of simple entry counting:
+
+```java
+import com.github.rudygunawan.kachi.api.Weigher;
+
+// Byte array cache limited by total size (10MB)
+Cache<String, byte[]> imageCache = CacheBuilder.newBuilder()
+    .maximumWeight(10_000_000)  // 10MB total
+    .weigher(Weigher.byteArrayWeigher())  // Weight = array length
+    .evictionPolicy(EvictionPolicy.LRU)
+    .build();
+
+// Small image: 100KB
+imageCache.put("thumbnail.png", new byte[100_000]);
+
+// Large image: 5MB
+imageCache.put("banner.jpg", new byte[5_000_000]);
+
+// When total weight exceeds 10MB, entries are evicted based on policy
+```
+
+**Built-in Weighers:**
+
+```java
+// 1. Singleton weigher (weight = 1 for all entries)
+// Equivalent to maximumSize
+Weigher.singletonWeigher()
+
+// 2. Byte array weigher (weight = array length)
+// Perfect for images, files, binary data
+Weigher.byteArrayWeigher()
+
+// 3. String weigher (weight = key.length + value.length)
+// Good for text caches with varying sizes
+Weigher.stringWeigher()
+
+// 4. Value string weigher (weight = value.length only)
+// When keys are small or fixed size
+Weigher.valueStringWeigher()
+```
+
+**Custom Weighers:**
+
+```java
+// Custom weigher for documents
+Cache<String, Document> cache = CacheBuilder.<String, Document>newBuilder()
+    .maximumWeight(1_000_000)  // 1MB of documents
+    .weigher((Weigher<String, Document>) (key, doc) -> {
+        // Estimate memory footprint
+        int contentSize = doc.getContent() != null ? doc.getContent().length() * 2 : 0;
+        int dataSize = doc.getData() != null ? doc.getData().length : 0;
+        return contentSize + dataSize + 100;  // + overhead estimate
+    })
+    .build();
+```
+
+**maximumSize vs maximumWeight:**
+
+```java
+// Scenario: Storing 100 small items (1KB each) + 1 huge item (10MB)
+
+// Option 1: Entry count limit (maximumSize = 10)
+// Problem: Only 10 items fit, wastes potential memory
+Cache<String, byte[]> cache1 = CacheBuilder.newBuilder()
+    .maximumSize(10)
+    .build();
+
+// Option 2: Weight limit (maximumWeight = 100MB)
+// Better: Stores ~100 small items OR ~10 huge items, uses memory efficiently
+Cache<String, byte[]> cache2 = CacheBuilder.newBuilder()
+    .maximumWeight(100_000_000)
+    .weigher(Weigher.byteArrayWeigher())
+    .build();
+```
+
+**Use cases:**
+- **Image/file caches**: Control total memory usage, not just count
+- **Document stores**: Variable-size documents with consistent memory limits
+- **API response caching**: Small JSON vs large binary responses
+- **Multi-tenant caches**: Weight by tenant size for fair resource allocation
+- **Mixed content types**: Text, images, and data with different sizes
+
+**Important notes:**
+- Weigher function must be fast (called on every put)
+- Weight must be positive and deterministic for same key/value
+- Weight should remain stable over time (don't use current time)
+- Can combine with any eviction policy (LRU, TinyLFU, etc.)
+
+See `com.github.rudygunawan.kachi.example.WeigherExample` for comprehensive examples.
 
 ### Removal Listeners
 
