@@ -8,6 +8,9 @@ import java.util.concurrent.atomic.AtomicLong;
  * @param <V> the type of the cached value
  */
 class CacheEntry<V> {
+    // Minimum time an entry must stay in cache before eligible for eviction (1 minute)
+    private static final long MIN_EVICTION_AGE_NANOS = 60_000_000_000L; // 60 seconds
+
     private final V value;
     private final long writeTime;
     private final long expirationTime;
@@ -83,5 +86,20 @@ class CacheEntry<V> {
      */
     boolean isExpiredAfter(long timeNanos) {
         return timeNanos >= expirationTime;
+    }
+
+    /**
+     * Returns the age of this entry in nanoseconds since it was written.
+     */
+    long getAgeNanos() {
+        return System.nanoTime() - writeTime;
+    }
+
+    /**
+     * Returns true if this entry is old enough to be considered for eviction.
+     * Entries must be at least 1 minute old before they can be evicted.
+     */
+    boolean isEligibleForEviction() {
+        return getAgeNanos() >= MIN_EVICTION_AGE_NANOS;
     }
 }

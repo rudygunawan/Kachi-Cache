@@ -7,12 +7,14 @@ import java.util.concurrent.locks.ReentrantReadWriteLock;
 
 /**
  * High-performance concurrent cache implementation with TTL, lazy loading, multiple eviction policies,
- * removal listeners, and write-priority semantics.
+ * removal listeners, write-priority semantics, and Micrometer metrics support.
  *
  * @param <K> the type of keys
  * @param <V> the type of values
  */
-class ConcurrentCacheImpl<K, V> implements LoadingCache<K, V> {
+class ConcurrentCacheImpl<K, V> implements LoadingCache<K, V>, CacheMetrics {
+    // Idle threshold - entries not accessed in last 5 minutes are considered idle
+    private static final long IDLE_THRESHOLD_NANOS = 5L * 60 * 1_000_000_000; // 5 minutes
     private final ConcurrentHashMap<K, CacheEntry<V>> storage;
     private final CacheLoader<? super K, V> loader;
     private final long maximumSize;
@@ -549,20 +551,50 @@ class ConcurrentCacheImpl<K, V> implements LoadingCache<K, V> {
         switch (evictionPolicy) {
             case LRU:
             case FIFO:
-                return accessOrder.poll();
+                return selectFromAccessOrder();
             case LFU:
                 return selectLFUCandidate();
             default:
-                return accessOrder.poll();
+                return selectFromAccessOrder();
         }
     }
 
+    /**
+     * Selects a key from the access order deque that is eligible for eviction.
+     * Entries must be at least 1 minute old to be evicted.
+     */
+    private K selectFromAccessOrder() {
+        // Poll from deque and check eligibility
+        K key;
+        while ((key = accessOrder.poll()) != null) {
+            CacheEntry<V> entry = storage.get(key);
+            if (entry != null && entry.isEligibleForEviction()) {
+                return key;
+            }
+            // Entry not eligible yet, put it back at the end
+            if (entry != null) {
+                accessOrder.offer(key);
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Selects the least frequently used entry that is eligible for eviction.
+     * Entries must be at least 1 minute old to be evicted.
+     */
     private K selectLFUCandidate() {
         K candidate = null;
         long minCount = Long.MAX_VALUE;
 
         for (Map.Entry<K, CacheEntry<V>> entry : storage.entrySet()) {
-            long count = entry.getValue().getAccessCount();
+            CacheEntry<V> cacheEntry = entry.getValue();
+            // Only consider entries that are old enough
+            if (!cacheEntry.isEligibleForEviction()) {
+                continue;
+            }
+
+            long count = cacheEntry.getAccessCount();
             if (count < minCount) {
                 minCount = count;
                 candidate = entry.getKey();
@@ -595,4 +627,68 @@ class ConcurrentCacheImpl<K, V> implements LoadingCache<K, V> {
         }
     }
 
+    // CacheMetrics interface implementation for Micrometer integration
+
+    @Override
+    public long hitCount() {
+        return hitCount.get();
+    }
+
+    @Override
+    public long missCount() {
+        return missCount.get();
+    }
+
+    @Override
+    public long evictionCount() {
+        return evictionCount.get();
+    }
+
+    @Override
+    public long loadSuccessCount() {
+        return loadSuccessCount.get();
+    }
+
+    @Override
+    public long loadFailureCount() {
+        return loadFailureCount.get();
+    }
+
+    @Override
+    public long totalLoadTimeNanos() {
+        return totalLoadTime.get();
+    }
+
+    @Override
+    public long idleEntryCount() {
+        long now = System.nanoTime();
+        long count = 0;
+
+        for (CacheEntry<V> entry : storage.values()) {
+            long timeSinceLastAccess = now - entry.getAccessTime();
+            if (timeSinceLastAccess >= IDLE_THRESHOLD_NANOS) {
+                count++;
+            }
+        }
+
+        return count;
+    }
+
+    @Override
+    public long estimatedMemoryUsageBytes() {
+        // Rough estimation:
+        // - Each ConcurrentHashMap entry: ~64 bytes (node overhead)
+        // - Each CacheEntry object: ~80 bytes (object header + fields)
+        // - Key and value size is application-specific, using rough estimate
+        // - This is a very rough approximation
+
+        long entryCount = storage.size();
+        long perEntryOverhead = 64 + 80; // HashMap node + CacheEntry
+
+        // Assume average key + value size of 100 bytes (very rough)
+        // Applications can override this with custom metrics if needed
+        long averageKeyValueSize = 100;
+
+        return entryCount * (perEntryOverhead + averageKeyValueSize);
+    }
 }

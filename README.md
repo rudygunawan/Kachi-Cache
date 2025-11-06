@@ -166,6 +166,14 @@ Cache<String, String> fifoCache = CacheBuilder.newBuilder()
 - **LFU**: Good when some keys are accessed much more frequently than others
 - **FIFO**: Simple policy when newer entries are generally more valuable
 
+**Minimum Age Protection:**
+All entries must remain in the cache for at least **1 minute** before they can be evicted due to size constraints. This prevents newly added entries from being immediately evicted, ensuring fair cache utilization. This protection applies to:
+- LRU eviction
+- LFU eviction
+- FIFO eviction
+
+Note: Manual invalidation (`invalidate()`) and replacements (`put()` on existing key) are not affected by this minimum age requirement.
+
 ### Removal Listeners
 
 Get notified when entries are removed from the cache:
@@ -249,6 +257,81 @@ new Thread(() -> {
 - Reads wait up to 1 second for writes, ensuring fresh data
 - Prevents stale reads during updates
 - Per-key locking for maximum concurrency
+
+### Micrometer Metrics Integration
+
+Kachi integrates with [Micrometer](https://micrometer.io/) to expose comprehensive cache metrics for monitoring and observability:
+
+```java
+import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
+
+// Create a meter registry (or use your existing one)
+MeterRegistry registry = new SimpleMeterRegistry();
+
+// Create and monitor a cache
+Cache<String, User> cache = CacheBuilder.newBuilder()
+    .maximumSize(1000)
+    .expireAfterWrite(10, TimeUnit.MINUTES)
+    .recordStats()  // Required for metrics
+    .build();
+
+// Bind metrics to registry
+MicrometerCacheMetrics.monitor(registry, (ConcurrentCacheImpl) cache, "userCache");
+```
+
+**Available Metrics:**
+
+| Metric Name | Type | Description |
+|-------------|------|-------------|
+| `cache.size` | Gauge | Current number of entries in cache |
+| `cache.hits` | Counter | Total number of cache hits |
+| `cache.misses` | Counter | Total number of cache misses |
+| `cache.evictions` | Counter | Total number of evictions |
+| `cache.loads` | Counter | Total loads (tagged by result: success/failure) |
+| `cache.load.duration` | Timer | Time spent loading values |
+| `cache.hit.ratio` | Gauge | Cache hit rate (0.0 to 1.0) |
+| `cache.idle.entries` | Gauge | Entries not accessed in last 5 minutes |
+| `cache.memory.estimated` | Gauge | Estimated memory usage in bytes |
+
+**With Custom Tags:**
+
+```java
+import io.micrometer.core.instrument.Tags;
+
+Tags customTags = Tags.of(
+    "application", "myapp",
+    "environment", "production"
+);
+
+MicrometerCacheMetrics.monitor(registry, cache, "userCache", customTags);
+```
+
+**Integration with Monitoring Systems:**
+
+```java
+// Prometheus
+PrometheusMeterRegistry registry = new PrometheusMeterRegistry(PrometheusConfig.DEFAULT);
+MicrometerCacheMetrics.monitor(registry, cache, "userCache");
+
+// Expose metrics endpoint
+app.get("/metrics", (req, res) -> {
+    res.contentType("text/plain");
+    res.send(registry.scrape());
+});
+
+// Grafana, Datadog, New Relic, etc. - use respective Micrometer registries
+```
+
+**Monitoring Dashboard Example:**
+
+```yaml
+# Useful queries for monitoring
+- Alert on low hit rate: cache_hit_ratio{cache="userCache"} < 0.5
+- Track eviction rate: rate(cache_evictions_total[5m])
+- Monitor memory usage: cache_memory_estimated_bytes
+- Detect idle entries: cache_idle_entries > 100
+```
 
 ## Advanced Usage
 
