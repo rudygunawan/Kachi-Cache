@@ -4,6 +4,7 @@ import com.github.rudygunawan.kachi.api.Cache;
 import com.github.rudygunawan.kachi.api.CacheLoader;
 import com.github.rudygunawan.kachi.api.Expiry;
 import com.github.rudygunawan.kachi.api.LoadingCache;
+import com.github.rudygunawan.kachi.api.RefreshPolicy;
 import com.github.rudygunawan.kachi.impl.ConcurrentCacheImpl;
 import com.github.rudygunawan.kachi.listener.RemovalListener;
 import com.github.rudygunawan.kachi.policy.EvictionPolicy;
@@ -56,6 +57,8 @@ public class CacheBuilder<K, V> {
     private EvictionPolicy evictionPolicy = EvictionPolicy.LRU;
     private RemovalListener<? super K, ? super V> removalListener;
     private Expiry<? super K, ? super V> expiry;
+    private RefreshPolicy<? super K, ? super V> refreshPolicy;
+    private long refreshAfterWriteNanos = UNSET_INT;
 
     private CacheBuilder() {
     }
@@ -271,6 +274,75 @@ public class CacheBuilder<K, V> {
     }
 
     /**
+     * Specifies a custom refresh policy that determines when and how frequently entries should be
+     * automatically reloaded in the background. This allows different entries to be refreshed at
+     * different rates based on time of day, key, value, or other application-specific logic.
+     *
+     * <p><b>Important:</b> Refresh policies only work with {@link LoadingCache} instances created
+     * via {@link #build(CacheLoader)}. Regular caches created via {@link #build()} will ignore
+     * refresh policies.
+     *
+     * <p>Refresh is performed asynchronously in the background. The old value continues to be
+     * served while the new value is being loaded. If the refresh fails, the old value is retained.
+     *
+     * <p><b>Note:</b> This is an advanced feature intended for use cases where entries have
+     * predictable access patterns, such as stock market data that is more active during trading
+     * hours. This feature must be explicitly activated and is NOT enabled by default.
+     *
+     * <p>Example usage:
+     * <pre>{@code
+     * RefreshPolicy<String, Data> policy = new TimeBasedRefreshPolicy<>(ZoneId.of("America/New_York"))
+     *     .addActiveWindow(9, 30, 16, 0, 1, TimeUnit.MINUTES)  // Market hours: every minute
+     *     .setDefaultInterval(10, TimeUnit.MINUTES);            // After hours: every 10 minutes
+     *
+     * LoadingCache<String, Data> cache = CacheBuilder.newBuilder()
+     *     .refreshAfter(policy)
+     *     .build(key -> loadData(key));
+     * }</pre>
+     *
+     * @param policy the custom refresh policy
+     * @return this builder instance
+     */
+    public <K1 extends K, V1 extends V> CacheBuilder<K1, V1> refreshAfter(
+            RefreshPolicy<? super K1, ? super V1> policy) {
+        if (policy == null) {
+            throw new NullPointerException("refresh policy cannot be null");
+        }
+        @SuppressWarnings("unchecked")
+        CacheBuilder<K1, V1> me = (CacheBuilder<K1, V1>) this;
+        me.refreshPolicy = policy;
+        return me;
+    }
+
+    /**
+     * Specifies that entries should be automatically refreshed once a fixed duration has elapsed
+     * after the entry's creation or the most recent replacement of its value. This is similar to
+     * Caffeine's refreshAfterWrite feature.
+     *
+     * <p><b>Important:</b> This only works with {@link LoadingCache} instances created via
+     * {@link #build(CacheLoader)}. Regular caches will ignore this setting.
+     *
+     * <p>Refresh is performed asynchronously in the background. The old value continues to be
+     * served while the new value is being loaded. If the refresh fails, the old value is retained.
+     *
+     * <p>This is a simpler alternative to {@link #refreshAfter(RefreshPolicy)} for cases where
+     * a fixed refresh interval is sufficient.
+     *
+     * @param duration the length of time after an entry is created or updated that it should be
+     *                 automatically refreshed
+     * @param unit the time unit for the duration
+     * @return this builder instance
+     * @throws IllegalArgumentException if duration is negative
+     */
+    public CacheBuilder<K, V> refreshAfterWrite(long duration, TimeUnit unit) {
+        if (duration < 0) {
+            throw new IllegalArgumentException("duration must not be negative");
+        }
+        this.refreshAfterWriteNanos = unit.toNanos(duration);
+        return this;
+    }
+
+    /**
      * Builds a cache which does not automatically load values when keys are requested.
      *
      * @return a cache having the requested features
@@ -327,5 +399,13 @@ public class CacheBuilder<K, V> {
 
     public Expiry<? super K, ? super V> getExpiry() {
         return expiry;
+    }
+
+    public RefreshPolicy<? super K, ? super V> getRefreshPolicy() {
+        return refreshPolicy;
+    }
+
+    public long getRefreshAfterWriteNanos() {
+        return refreshAfterWriteNanos;
     }
 }

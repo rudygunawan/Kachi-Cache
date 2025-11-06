@@ -16,6 +16,7 @@ public class CacheEntry<V> {
     private final long expirationTime;
     private final AtomicLong accessTime;
     private final AtomicLong accessCount;
+    private final AtomicLong lastRefreshTime;
 
     /**
      * Creates a new cache entry with the specified value and expiration.
@@ -29,6 +30,7 @@ public class CacheEntry<V> {
         this.expirationTime = ttlNanos > 0 ? writeTime + ttlNanos : Long.MAX_VALUE;
         this.accessTime = new AtomicLong(writeTime);
         this.accessCount = new AtomicLong(0);
+        this.lastRefreshTime = new AtomicLong(writeTime);
     }
 
     /**
@@ -101,5 +103,19 @@ public class CacheEntry<V> {
      */
     public boolean isEligibleForEviction() {
         return getAgeNanos() >= MIN_EVICTION_AGE_NANOS;
+    }
+
+    /**
+     * Returns the time (in nanoseconds) when this entry was last refreshed.
+     */
+    public long getLastRefreshTime() {
+        return lastRefreshTime.get();
+    }
+
+    /**
+     * Updates the last refresh time to the current time.
+     */
+    public void updateLastRefreshTime() {
+        lastRefreshTime.set(System.nanoTime());
     }
 }

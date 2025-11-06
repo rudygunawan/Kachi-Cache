@@ -3,6 +3,7 @@ package com.github.rudygunawan.kachi.impl;
 import com.github.rudygunawan.kachi.api.CacheLoader;
 import com.github.rudygunawan.kachi.api.Expiry;
 import com.github.rudygunawan.kachi.api.LoadingCache;
+import com.github.rudygunawan.kachi.api.RefreshPolicy;
 import com.github.rudygunawan.kachi.builder.CacheBuilder;
 import com.github.rudygunawan.kachi.listener.RemovalListener;
 import com.github.rudygunawan.kachi.metrics.CacheMetrics;
@@ -36,6 +37,8 @@ public class ConcurrentCacheImpl<K, V> implements LoadingCache<K, V>, CacheMetri
     private final EvictionPolicy evictionPolicy;
     private final RemovalListener<? super K, ? super V> removalListener;
     private final Expiry<? super K, ? super V> expiry;
+    private final RefreshPolicy<? super K, ? super V> refreshPolicy;
+    private final long refreshAfterWriteNanos;
 
     // Statistics
     private final AtomicLong hitCount = new AtomicLong(0);
@@ -56,8 +59,15 @@ public class ConcurrentCacheImpl<K, V> implements LoadingCache<K, V>, CacheMetri
     private final ScheduledExecutorService cleanupScheduler;
     private final ScheduledFuture<?> cleanupTask;
 
+    // Scheduled refresh for entries
+    private final ScheduledExecutorService refreshScheduler;
+    private final ScheduledFuture<?> refreshTask;
+
     // Read timeout for write-priority
     private static final long READ_TIMEOUT_MS = 1000;
+
+    // Refresh check interval (check every 30 seconds)
+    private static final long REFRESH_CHECK_INTERVAL_MS = 30_000;
 
     /**
      * Constructor for non-loading cache.
@@ -80,6 +90,8 @@ public class ConcurrentCacheImpl<K, V> implements LoadingCache<K, V>, CacheMetri
         this.evictionPolicy = builder.getEvictionPolicy();
         this.removalListener = (RemovalListener<? super K, ? super V>) builder.getRemovalListener();
         this.expiry = (Expiry<? super K, ? super V>) builder.getExpiry();
+        this.refreshPolicy = (RefreshPolicy<? super K, ? super V>) builder.getRefreshPolicy();
+        this.refreshAfterWriteNanos = builder.getRefreshAfterWriteNanos();
 
         // Start scheduled TTL cleanup task (runs every minute)
         if (expireAfterWriteNanos > 0 || expireAfterAccessNanos > 0 || expiry != null) {
@@ -95,6 +107,24 @@ public class ConcurrentCacheImpl<K, V> implements LoadingCache<K, V>, CacheMetri
         } else {
             this.cleanupScheduler = null;
             this.cleanupTask = null;
+        }
+
+        // Start scheduled refresh task (runs every 30 seconds) - only for LoadingCache
+        if (loader != null && (refreshPolicy != null || refreshAfterWriteNanos > 0)) {
+            this.refreshScheduler = Executors.newSingleThreadScheduledExecutor(r -> {
+                Thread t = new Thread(r, "kachi-cache-refresh");
+                t.setDaemon(true);
+                return t;
+            });
+            this.refreshTask = refreshScheduler.scheduleAtFixedRate(
+                    this::refreshEntries,
+                    REFRESH_CHECK_INTERVAL_MS,
+                    REFRESH_CHECK_INTERVAL_MS,
+                    TimeUnit.MILLISECONDS
+            );
+        } else {
+            this.refreshScheduler = null;
+            this.refreshTask = null;
         }
     }
 
@@ -663,12 +693,120 @@ public class ConcurrentCacheImpl<K, V> implements LoadingCache<K, V>, CacheMetri
     /**
      * Shutdown the cleanup scheduler when cache is no longer needed.
      */
+    /**
+     * Background task that checks all entries and refreshes those that need refreshing.
+     * This runs periodically based on REFRESH_CHECK_INTERVAL_MS.
+     */
+    private void refreshEntries() {
+        if (loader == null) {
+            return; // No loader, cannot refresh
+        }
+
+        long currentTime = System.nanoTime();
+
+        // Iterate over all entries and check if they need refresh
+        for (Map.Entry<K, CacheEntry<V>> mapEntry : storage.entrySet()) {
+            K key = mapEntry.getKey();
+            CacheEntry<V> entry = mapEntry.getValue();
+
+            if (shouldRefresh(key, entry, currentTime)) {
+                // Refresh asynchronously - don't block the scheduler thread
+                CompletableFuture.runAsync(() -> refreshEntry(key));
+            }
+        }
+    }
+
+    /**
+     * Determines if an entry should be refreshed based on the refresh policy or fixed interval.
+     */
+    private boolean shouldRefresh(K key, CacheEntry<V> entry, long currentTime) {
+        long lastRefresh = entry.getLastRefreshTime();
+        long timeSinceRefresh = currentTime - lastRefresh;
+
+        // Check custom refresh policy first
+        if (refreshPolicy != null) {
+            try {
+                long refreshInterval = refreshPolicy.getRefreshInterval(key, entry.getValue(), currentTime);
+                return timeSinceRefresh >= refreshInterval;
+            } catch (Exception e) {
+                // If policy throws exception, fall through to fixed interval
+                System.err.println("Error in refresh policy: " + e.getMessage());
+            }
+        }
+
+        // Fall back to fixed refresh interval
+        if (refreshAfterWriteNanos > 0) {
+            return timeSinceRefresh >= refreshAfterWriteNanos;
+        }
+
+        return false;
+    }
+
+    /**
+     * Refreshes a single entry by reloading its value using the CacheLoader.
+     * The old value continues to be served until the new value is loaded.
+     */
+    private void refreshEntry(K key) {
+        CacheEntry<V> oldEntry = storage.get(key);
+        if (oldEntry == null) {
+            return; // Entry was removed
+        }
+
+        try {
+            // Load new value
+            V newValue = loader.load(key);
+
+            if (newValue != null) {
+                // Update the entry with new value
+                ReentrantReadWriteLock lock = getOrCreateLock(key);
+                lock.writeLock().lock();
+                try {
+                    // Check if entry still exists and wasn't replaced
+                    CacheEntry<V> currentEntry = storage.get(key);
+                    if (currentEntry != null && currentEntry.getLastRefreshTime() == oldEntry.getLastRefreshTime()) {
+                        // Update with new entry
+                        long ttl = getTtlForEntry(key, newValue, currentEntry);
+                        CacheEntry<V> newEntry = new CacheEntry<>(newValue, ttl);
+                        newEntry.updateLastRefreshTime();
+                        storage.put(key, newEntry);
+
+                        // Notify refresh policy
+                        if (refreshPolicy != null) {
+                            try {
+                                refreshPolicy.onRefreshSuccess(key, oldEntry.getValue(), newValue, System.nanoTime());
+                            } catch (Exception e) {
+                                // Ignore callback errors
+                            }
+                        }
+                    }
+                } finally {
+                    lock.writeLock().unlock();
+                }
+            }
+        } catch (Exception e) {
+            // Refresh failed - keep old value
+            if (refreshPolicy != null) {
+                try {
+                    refreshPolicy.onRefreshFailure(key, oldEntry.getValue(), e, System.nanoTime());
+                } catch (Exception callbackError) {
+                    // Ignore callback errors
+                }
+            }
+        }
+    }
+
     public void shutdown() {
         if (cleanupTask != null) {
             cleanupTask.cancel(false);
         }
         if (cleanupScheduler != null) {
             cleanupScheduler.shutdown();
+        }
+        if (refreshTask != null) {
+            refreshTask.cancel(false);
+        }
+        if (refreshScheduler != null) {
+            refreshScheduler.shutdown();
         }
     }
 
