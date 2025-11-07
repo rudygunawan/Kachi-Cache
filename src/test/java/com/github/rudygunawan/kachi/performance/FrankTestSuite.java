@@ -12,12 +12,24 @@ import java.util.stream.IntStream;
 import static org.junit.jupiter.api.Assertions.*;
 
 /**
- * Performance tests for bulk operations (putAll, getAllPresent, invalidateAll).
+ * Frank Test Suite - JUnit 5 Performance Tests for Kachi Cache Bulk Operations.
+ *
+ * <p>Named after being "frank" (honest) about performance, Frank Test Suite provides
+ * automated JUnit tests that validate bulk operation performance improvements.
+ *
+ * <p><b>Frank Test gives you the frank truth about your cache performance.</b>
  *
  * <p>Tests validate that bulk operations provide measurable performance improvements
  * over individual operations for various batch sizes and concurrency scenarios.
+ *
+ * <p>Run with Maven:
+ * <pre>
+ * mvn test -Dtest=FrankTestSuite
+ * </pre>
+ *
+ * @see <a href="../../../../../FRANK_TEST.md">Frank Test Documentation</a>
  */
-public class BulkOperationsPerformanceTest {
+public class FrankTestSuite {
 
     private static final int WARMUP_ITERATIONS = 3;
     private static final int TEST_ITERATIONS = 10;
@@ -27,7 +39,7 @@ public class BulkOperationsPerformanceTest {
      */
     @Test
     public void testPutAllPerformance() {
-        System.out.println("\n=== PUT Performance Test ===\n");
+        System.out.println("\n=== FRANK TEST: PUT Operations ===\n");
 
         int[] batchSizes = {10, 100, 1000, 10000};
 
@@ -85,7 +97,7 @@ public class BulkOperationsPerformanceTest {
      */
     @Test
     public void testInvalidateAllPerformance() {
-        System.out.println("\n=== DELETE Performance Test ===\n");
+        System.out.println("\n=== FRANK TEST: DELETE Operations ===\n");
 
         int[] batchSizes = {10, 100, 1000, 10000};
 
@@ -143,7 +155,7 @@ public class BulkOperationsPerformanceTest {
      */
     @Test
     public void testGetAllPresentPerformance() {
-        System.out.println("\n=== GET Performance Test ===\n");
+        System.out.println("\n=== FRANK TEST: GET Operations ===\n");
 
         int[] batchSizes = {10, 100, 1000, 10000};
 

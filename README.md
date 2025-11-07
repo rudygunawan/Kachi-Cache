@@ -239,7 +239,7 @@ Map<Integer, User> users = cache.getAll(userIds);
 - **Session cleanup**: Remove expired sessions in bulk
 - **Multi-tenant operations**: Load data for multiple tenants at once
 
-See `com.github.rudygunawan.kachi.example.BulkOperationsExample` for detailed performance comparisons and examples.
+See `com.github.rudygunawan.kachi.example.BulkOperationsExample` for detailed examples and [Frank Test](FRANK_TEST.md) for honest performance benchmarks.
 
 ### Per-Entry Expiration (Variable TTL)
 

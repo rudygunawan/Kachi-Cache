@@ -11,15 +11,34 @@ import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 
 /**
- * Standalone performance runner for bulk operations.
+ * Frank Test - The Official Kachi Cache Bulk Operations Performance Benchmark.
  *
- * <p>Run this class directly to generate a comprehensive performance report:
+ * <p>Named after being "frank" (honest) about performance, Frank Test provides
+ * unbiased, real-world benchmarks for bulk operations without marketing hype.
+ *
+ * <p><b>Frank Test gives you the frank truth about your cache performance.</b>
+ *
+ * <p>Run this test directly to generate comprehensive performance reports:
  * <pre>
+ * # Compile
+ * javac -d target/test-classes -cp target/classes \
+ *   src/test/java/com/github/rudygunawan/kachi/performance/FrankTest.java
+ *
+ * # Run
  * java -cp target/test-classes:target/classes \
- *   com.github.rudygunawan.kachi.performance.BulkOperationsPerformanceRunner
+ *   com.github.rudygunawan.kachi.performance.FrankTest
  * </pre>
+ *
+ * <p>Or with Maven:
+ * <pre>
+ * mvn test-compile exec:java \
+ *   -Dexec.mainClass="com.github.rudygunawan.kachi.performance.FrankTest" \
+ *   -Dexec.classpathScope=test
+ * </pre>
+ *
+ * @see <a href="../../../../../FRANK_TEST.md">Frank Test Documentation</a>
  */
-public class BulkOperationsPerformanceRunner {
+public class FrankTest {
 
     private static final int WARMUP_ITERATIONS = 3;
     private static final int TEST_ITERATIONS = 10;
@@ -28,8 +47,12 @@ public class BulkOperationsPerformanceRunner {
 
     public static void main(String[] args) throws Exception {
         System.out.println("╔═══════════════════════════════════════════════════════════════╗");
-        System.out.println("║   Kachi Cache - Bulk Operations Performance Benchmark        ║");
+        System.out.println("║              🎯 FRANK TEST - Performance Benchmark            ║");
+        System.out.println("║                                                               ║");
+        System.out.println("║        Kachi Cache Bulk Operations - Honest Results          ║");
         System.out.println("╚═══════════════════════════════════════════════════════════════╝");
+        System.out.println();
+        System.out.println("\"Frank Test gives you the frank truth about cache performance.\"");
         System.out.println();
         System.out.println("Configuration:");
         System.out.println("  Warmup iterations: " + WARMUP_ITERATIONS);
@@ -39,7 +62,7 @@ public class BulkOperationsPerformanceRunner {
         System.out.println("  Processors:       " + Runtime.getRuntime().availableProcessors());
         System.out.println();
 
-        // Run all benchmarks
+        // Run all Frank Test benchmarks
         benchmarkPutOperations();
         benchmarkDeleteOperations();
         benchmarkReadOperations();
@@ -47,7 +70,10 @@ public class BulkOperationsPerformanceRunner {
         benchmarkMixedWorkload();
 
         System.out.println("\n╔═══════════════════════════════════════════════════════════════╗");
-        System.out.println("║                    Benchmark Complete                         ║");
+        System.out.println("║                   ✅ Frank Test Complete                      ║");
+        System.out.println("║                                                               ║");
+        System.out.println("║  Remember: Frank Test doesn't lie. If it's slow here,        ║");
+        System.out.println("║  it's slow in production.                                    ║");
         System.out.println("╚═══════════════════════════════════════════════════════════════╝");
 
         System.exit(0);

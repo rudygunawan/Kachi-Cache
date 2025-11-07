@@ -1,10 +1,18 @@
-# Bulk Operations Performance Tests
+# Frank Test - Bulk Operations Performance Tests
 
-This directory contains comprehensive performance tests for bulk operations in Kachi Cache.
+**Frank Test** is the official performance testing suite for Kachi Cache bulk operations.
+
+Named after being "frank" (honest) about performance, Frank Test provides unbiased, real-world benchmarks without marketing hype.
+
+**Frank Test gives you the frank truth about your cache performance.**
+
+📖 **For comprehensive documentation, see:** [FRANK_TEST.md](../../../../../FRANK_TEST.md)
+
+---
 
 ## Test Files
 
-### 1. BulkOperationsPerformanceTest.java
+### 1. FrankTestSuite.java
 JUnit 5 test class with detailed assertions and performance validations.
 
 **Tests included:**
@@ -16,27 +24,27 @@ JUnit 5 test class with detailed assertions and performance validations.
 
 **Run with Maven:**
 ```bash
-mvn test -Dtest=BulkOperationsPerformanceTest
+mvn test -Dtest=FrankTestSuite
 ```
 
-### 2. BulkOperationsPerformanceRunner.java
-Standalone runner that generates detailed performance reports without requiring JUnit.
+### 2. FrankTest.java
+Standalone Frank Test runner that generates detailed performance reports without requiring JUnit.
 
 **Run directly:**
 ```bash
 # Compile
 javac -d target/test-classes -cp target/classes \
-  src/test/java/com/github/rudygunawan/kachi/performance/BulkOperationsPerformanceRunner.java
+  src/test/java/com/github/rudygunawan/kachi/performance/FrankTest.java
 
 # Run
 java -cp target/test-classes:target/classes \
-  com.github.rudygunawan.kachi.performance.BulkOperationsPerformanceRunner
+  com.github.rudygunawan.kachi.performance.FrankTest
 ```
 
 **Or with Maven:**
 ```bash
 mvn test-compile exec:java \
-  -Dexec.mainClass="com.github.rudygunawan.kachi.performance.BulkOperationsPerformanceRunner" \
+  -Dexec.mainClass="com.github.rudygunawan.kachi.performance.FrankTest" \
   -Dexec.classpathScope=test
 ```
 
