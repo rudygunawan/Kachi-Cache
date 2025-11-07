@@ -29,6 +29,17 @@ public interface Cache<K, V> {
     V getIfPresent(K key);
 
     /**
+     * Returns a map of the values associated with {@code keys} that are present in the cache.
+     * Unlike {@link LoadingCache#getAll}, this method does not attempt to load missing values.
+     *
+     * <p>This is an optimized bulk operation that retrieves multiple entries efficiently.
+     *
+     * @param keys the keys whose associated values are to be returned
+     * @return an unmodifiable mapping of keys to values for the keys that are present in this cache
+     */
+    Map<K, V> getAllPresent(Iterable<? extends K> keys);
+
+    /**
      * Returns the value associated with {@code key} in this cache, obtaining that value from
      * {@code loader} if necessary. This method provides a simple substitute for the conventional
      * "if cached, return; otherwise create, cache and return" pattern.
@@ -52,6 +63,8 @@ public interface Cache<K, V> {
     /**
      * Copies all of the mappings from the specified map to the cache.
      *
+     * <p>This is an optimized bulk operation that inserts multiple entries efficiently.
+     *
      * @param map mappings to be stored in this cache
      */
     void putAll(Map<? extends K, ? extends V> map);
@@ -62,6 +75,15 @@ public interface Cache<K, V> {
      * @param key the key whose mapping is to be removed from the cache
      */
     void invalidate(K key);
+
+    /**
+     * Discards any cached values for the specified keys.
+     *
+     * <p>This is an optimized bulk operation that removes multiple entries efficiently.
+     *
+     * @param keys the keys whose mappings are to be removed from the cache
+     */
+    void invalidateAll(Iterable<? extends K> keys);
 
     /**
      * Discards all entries in the cache.

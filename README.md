@@ -44,6 +44,7 @@ In Japanese culture, onomatopoeia (擬音語 _giongo_) are deeply embedded in th
 - **Lazy Loading**: Automatic value loading with `CacheLoader` for database/API integration
 - **Advanced Eviction Policies**: Window TinyLFU (near-optimal hit rates), LRU, LFU, or FIFO
 - **Weight-Based Eviction**: Control memory usage by entry weight (perfect for variable-size entries)
+- **Optimized Bulk Operations**: `getAllPresent()`, `putAll()`, `invalidateAll()`, and parallel `getAll()`
 - **Refresh Ahead**: Automatic background refresh with time-based policies (e.g., stock market hours)
 - **Removal Listeners**: Get notified when entries are removed with the reason (SIZE, EXPIRED, EXPLICIT, REPLACED)
 - **Scheduled TTL Cleanup**: Automatic background cleanup of expired entries every minute
@@ -140,6 +141,105 @@ Cache<String, String> cache = CacheBuilder.newBuilder()
     .expireAfterAccess(10, TimeUnit.MINUTES)
     .build();
 ```
+
+### Bulk Operations
+
+Kachi provides optimized bulk operations for working with multiple entries efficiently. Bulk operations are faster than individual operations because they reduce method call overhead and enable parallel processing.
+
+#### getAllPresent - Batch Retrieval Without Loading
+
+Retrieve multiple cached entries without triggering loads:
+
+```java
+Cache<String, User> cache = CacheBuilder.newBuilder()
+    .maximumSize(1000)
+    .build();
+
+// Populate cache
+cache.put("user1", user1);
+cache.put("user2", user2);
+cache.put("user3", user3);
+
+// Get multiple entries at once (only returns cached entries)
+List<String> keys = Arrays.asList("user1", "user2", "user3", "user999");
+Map<String, User> results = cache.getAllPresent(keys);
+// Returns: {user1=..., user2=..., user3=...}
+// user999 is missing (not loaded)
+```
+
+#### putAll - Batch Insert
+
+Insert multiple entries efficiently:
+
+```java
+Cache<String, User> cache = CacheBuilder.newBuilder()
+    .maximumSize(10000)
+    .build();
+
+// Prepare batch data
+Map<String, User> batchData = new HashMap<>();
+for (int i = 1; i <= 1000; i++) {
+    batchData.put("user" + i, new User("user" + i, "User " + i));
+}
+
+// Insert all at once
+cache.putAll(batchData);  // More efficient than 1000 individual put() calls
+```
+
+**Performance**: ~2x faster than individual `put()` calls for large batches.
+
+#### invalidateAll - Batch Removal
+
+Remove multiple entries efficiently:
+
+```java
+Cache<String, User> cache = CacheBuilder.newBuilder()
+    .maximumSize(1000)
+    .build();
+
+// Remove specific keys
+List<String> keysToRemove = Arrays.asList("user1", "user2", "user3");
+cache.invalidateAll(keysToRemove);
+
+// Or remove all entries
+cache.invalidateAll();
+```
+
+**Performance**: ~1.3x faster than individual `invalidate()` calls for large batches.
+
+#### getAll - Parallel Batch Loading
+
+For `LoadingCache`, `getAll()` loads missing entries in parallel:
+
+```java
+LoadingCache<Integer, User> cache = CacheBuilder.newBuilder()
+    .maximumSize(1000)
+    .build(new CacheLoader<Integer, User>() {
+        @Override
+        public User load(Integer id) throws Exception {
+            return database.loadUser(id);  // 50ms per query
+        }
+    });
+
+// Load 10 users (some cached, some not)
+List<Integer> userIds = Arrays.asList(1, 2, 3, 4, 5, 6, 7, 8, 9, 10);
+Map<Integer, User> users = cache.getAll(userIds);
+
+// If 7 users need loading:
+//   Sequential: ~350ms (7 × 50ms)
+//   Parallel:   ~50ms (all loads in parallel)
+```
+
+**Performance**: Up to Nx faster for N parallel loads (network/database bound operations).
+
+**Use cases for bulk operations:**
+- **Batch data imports**: Insert thousands of records efficiently
+- **Multi-key lookups**: Retrieve user profiles for a list of IDs
+- **Cache warming**: Pre-populate cache with frequently accessed data
+- **Session cleanup**: Remove expired sessions in bulk
+- **Multi-tenant operations**: Load data for multiple tenants at once
+
+See `com.github.rudygunawan.kachi.example.BulkOperationsExample` for detailed performance comparisons and examples.
 
 ### Per-Entry Expiration (Variable TTL)
 

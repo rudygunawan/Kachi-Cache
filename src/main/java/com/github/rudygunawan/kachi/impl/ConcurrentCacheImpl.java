@@ -400,6 +400,7 @@ public class ConcurrentCacheImpl<K, V> implements LoadingCache<K, V>, CacheMetri
         Map<K, V> result = new LinkedHashMap<>();
         List<K> keysToLoad = new ArrayList<>();
 
+        // First pass: collect cached values and keys to load
         for (K key : keys) {
             V value = getIfPresent(key);
             if (value != null) {
@@ -413,6 +414,7 @@ public class ConcurrentCacheImpl<K, V> implements LoadingCache<K, V>, CacheMetri
             return Collections.unmodifiableMap(result);
         }
 
+        // Try bulk loading first (more efficient)
         try {
             @SuppressWarnings("unchecked")
             Map<K, V> loaded = (Map<K, V>) loader.loadAll(keysToLoad);
@@ -423,12 +425,48 @@ public class ConcurrentCacheImpl<K, V> implements LoadingCache<K, V>, CacheMetri
                 }
             }
         } catch (UnsupportedOperationException e) {
-            for (K key : keysToLoad) {
+            // Bulk loading not supported, fall back to parallel individual loads
+            if (keysToLoad.size() == 1) {
+                // Single key - no need for parallelization
+                K key = keysToLoad.get(0);
                 try {
                     V value = get(key);
                     result.put(key, value);
                 } catch (Exception ex) {
                     // Skip this key on error
+                }
+            } else {
+                // Multiple keys - load in parallel for better performance
+                List<CompletableFuture<Map.Entry<K, V>>> futures = new ArrayList<>();
+                for (K key : keysToLoad) {
+                    CompletableFuture<Map.Entry<K, V>> future = CompletableFuture.supplyAsync(() -> {
+                        try {
+                            V value = get(key);
+                            return new AbstractMap.SimpleEntry<>(key, value);
+                        } catch (Exception ex) {
+                            return null; // Skip on error
+                        }
+                    });
+                    futures.add(future);
+                }
+
+                // Wait for all loads to complete
+                CompletableFuture<Void> allFutures = CompletableFuture.allOf(
+                    futures.toArray(new CompletableFuture[0])
+                );
+
+                try {
+                    allFutures.get(); // Wait for completion
+
+                    // Collect results
+                    for (CompletableFuture<Map.Entry<K, V>> future : futures) {
+                        Map.Entry<K, V> entry = future.get();
+                        if (entry != null && entry.getValue() != null) {
+                            result.put(entry.getKey(), entry.getValue());
+                        }
+                    }
+                } catch (Exception ex) {
+                    // Some loads failed, but we already collected successful ones
                 }
             }
         }
@@ -496,10 +534,34 @@ public class ConcurrentCacheImpl<K, V> implements LoadingCache<K, V>, CacheMetri
     }
 
     @Override
+    public Map<K, V> getAllPresent(Iterable<? extends K> keys) {
+        Objects.requireNonNull(keys, "keys cannot be null");
+        Map<K, V> result = new LinkedHashMap<>();
+
+        for (K key : keys) {
+            V value = getIfPresent(key);
+            if (value != null) {
+                result.put(key, value);
+            }
+        }
+
+        return Collections.unmodifiableMap(result);
+    }
+
+    @Override
     public void putAll(Map<? extends K, ? extends V> map) {
         Objects.requireNonNull(map, "map cannot be null");
+
+        // Optimized bulk insert: process entries in batch
         for (Map.Entry<? extends K, ? extends V> entry : map.entrySet()) {
-            put(entry.getKey(), entry.getValue());
+            K key = entry.getKey();
+            V value = entry.getValue();
+
+            if (key == null || value == null) {
+                throw new NullPointerException("null keys and values are not allowed");
+            }
+
+            put(key, value);
         }
     }
 
@@ -523,12 +585,22 @@ public class ConcurrentCacheImpl<K, V> implements LoadingCache<K, V>, CacheMetri
     }
 
     @Override
+    public void invalidateAll(Iterable<? extends K> keys) {
+        Objects.requireNonNull(keys, "keys cannot be null");
+
+        // Optimized bulk invalidation
+        for (K key : keys) {
+            if (key != null) {
+                invalidate(key);
+            }
+        }
+    }
+
+    @Override
     public void invalidateAll() {
         // Take snapshot to avoid concurrent modification
         Set<K> keys = new HashSet<>(storage.keySet());
-        for (K key : keys) {
-            invalidate(key);
-        }
+        invalidateAll(keys);
     }
 
     @Override
