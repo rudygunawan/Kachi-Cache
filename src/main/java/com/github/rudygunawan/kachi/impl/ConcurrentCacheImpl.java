@@ -18,7 +18,6 @@ import com.github.rudygunawan.kachi.policy.RemovalCause;
 import java.util.*;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicLong;
-import java.util.concurrent.locks.ReentrantReadWriteLock;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
@@ -74,7 +73,6 @@ public class ConcurrentCacheImpl<K, V> implements LoadingCache<K, V>, CacheMetri
 
     // Eviction tracking - different for each policy
     private final ConcurrentLinkedDeque<K> accessOrder = new ConcurrentLinkedDeque<>(); // For LRU and FIFO
-    private final ConcurrentHashMap<K, ReentrantReadWriteLock> keyLocks = new ConcurrentHashMap<>();
 
     // Window TinyLFU segments (only used when evictionPolicy == WINDOW_TINY_LFU)
     private final ConcurrentLinkedDeque<K> windowQueue;      // 1% of cache - admission window
@@ -196,71 +194,24 @@ public class ConcurrentCacheImpl<K, V> implements LoadingCache<K, V>, CacheMetri
     public V getIfPresent(K key) {
         Objects.requireNonNull(key, "key cannot be null");
 
-        // Acquire read lock with timeout for write-priority
-        ReentrantReadWriteLock lock = getOrCreateLock(key);
-        boolean readLockHeld = false;
-        try {
-            if (!lock.readLock().tryLock(READ_TIMEOUT_MS, TimeUnit.MILLISECONDS)) {
-                // Timeout waiting for write to complete
-                if (recordStats) missCount.incrementAndGet();
-                return null;
-            }
-            readLockHeld = true;
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
+        // Lock-free read - just get from ConcurrentHashMap
+        CacheEntry<V> entry = storage.get(key);
+
+        if (entry == null) {
             if (recordStats) missCount.incrementAndGet();
             return null;
         }
 
-        try {
-            CacheEntry<V> entry = storage.get(key);
-
-            if (entry == null) {
-                if (recordStats) missCount.incrementAndGet();
-                return null;
-            }
-
-            // Check if expired
-            if (isExpired(entry)) {
-                lock.readLock().unlock();
-                readLockHeld = false;
-                // Upgrade to write lock to remove
-                lock.writeLock().lock();
-                try {
-                    // Double-check after acquiring write lock
-                    entry = storage.get(key);
-                    if (entry != null && isExpired(entry)) {
-                        storage.remove(key);
-                        // Subtract the expired entry's weight
-                        currentWeight.addAndGet(-entry.getWeight());
-                        removeFromEvictionQueues(key);
-                        fireRemovalEvent(key, entry.getValue(), RemovalCause.EXPIRED);
-                        if (recordStats) {
-                            missCount.incrementAndGet();
-                            evictionCount.incrementAndGet();
-                        }
-                    }
-                    return null;
-                } finally {
-                    lock.writeLock().unlock();
-                }
-            }
-
-            // Update access time for expire-after-access
-            if (expireAfterAccessNanos > 0) {
-                entry.updateAccessTime();
-            }
-
-            // Update tracking for eviction policy
-            updateAccessTracking(key);
-
-            if (recordStats) hitCount.incrementAndGet();
-            return entry.getValue();
-        } finally {
-            if (readLockHeld) {
-                lock.readLock().unlock();
-            }
+        // Update access time for expire-after-access
+        if (expireAfterAccessNanos > 0) {
+            entry.updateAccessTime();
         }
+
+        // Update tracking for eviction policy
+        updateAccessTracking(key);
+
+        if (recordStats) hitCount.incrementAndGet();
+        return entry.getValue();
     }
 
     @Override
@@ -273,41 +224,35 @@ public class ConcurrentCacheImpl<K, V> implements LoadingCache<K, V>, CacheMetri
             return value;
         }
 
-        // Load the value with write lock
-        ReentrantReadWriteLock lock = getOrCreateLock(key);
-        lock.writeLock().lock();
-        try {
-            // Double-check after acquiring write lock
-            CacheEntry<V> entry = storage.get(key);
-            if (entry != null && !isExpired(entry)) {
-                if (expireAfterAccessNanos > 0) {
-                    entry.updateAccessTime();
-                }
-                if (recordStats) hitCount.incrementAndGet();
-                return entry.getValue();
+        // Load the value - lock-free
+        // Double-check - another thread might have loaded it
+        CacheEntry<V> entry = storage.get(key);
+        if (entry != null) {
+            if (expireAfterAccessNanos > 0) {
+                entry.updateAccessTime();
             }
+            if (recordStats) hitCount.incrementAndGet();
+            return entry.getValue();
+        }
 
-            long startTime = System.nanoTime();
-            try {
-                value = loader.call();
-                if (value == null) {
-                    throw new NullPointerException("loader returned null value");
-                }
-                putInternal(key, value, RemovalCause.REPLACED);
-                if (recordStats) {
-                    loadSuccessCount.incrementAndGet();
-                    totalLoadTime.addAndGet(System.nanoTime() - startTime);
-                }
-                return value;
-            } catch (Exception e) {
-                if (recordStats) {
-                    loadFailureCount.incrementAndGet();
-                    totalLoadTime.addAndGet(System.nanoTime() - startTime);
-                }
-                throw e;
+        long startTime = System.nanoTime();
+        try {
+            value = loader.call();
+            if (value == null) {
+                throw new NullPointerException("loader returned null value");
             }
-        } finally {
-            lock.writeLock().unlock();
+            putInternal(key, value, RemovalCause.REPLACED);
+            if (recordStats) {
+                loadSuccessCount.incrementAndGet();
+                totalLoadTime.addAndGet(System.nanoTime() - startTime);
+            }
+            return value;
+        } catch (Exception e) {
+            if (recordStats) {
+                loadFailureCount.incrementAndGet();
+                totalLoadTime.addAndGet(System.nanoTime() - startTime);
+            }
+            throw e;
         }
     }
 
@@ -353,13 +298,11 @@ public class ConcurrentCacheImpl<K, V> implements LoadingCache<K, V>, CacheMetri
             }
         }
 
-        // We're responsible for loading with write lock
-        ReentrantReadWriteLock lock = getOrCreateLock(key);
-        lock.writeLock().lock();
+        // We're responsible for loading - lock-free
         try {
-            // Double-check after acquiring write lock
+            // Double-check - another thread might have loaded it
             CacheEntry<V> entry = storage.get(key);
-            if (entry != null && !isExpired(entry)) {
+            if (entry != null) {
                 if (expireAfterAccessNanos > 0) {
                     entry.updateAccessTime();
                 }
@@ -389,7 +332,6 @@ public class ConcurrentCacheImpl<K, V> implements LoadingCache<K, V>, CacheMetri
                 throw e;
             }
         } finally {
-            lock.writeLock().unlock();
             loadingFutures.remove(key);
         }
     }
@@ -510,17 +452,12 @@ public class ConcurrentCacheImpl<K, V> implements LoadingCache<K, V>, CacheMetri
         Objects.requireNonNull(key, "key cannot be null");
         Objects.requireNonNull(value, "value cannot be null");
 
-        ReentrantReadWriteLock lock = getOrCreateLock(key);
-        lock.writeLock().lock();
-        try {
-            putInternal(key, value, RemovalCause.REPLACED);
-        } finally {
-            lock.writeLock().unlock();
-        }
+        // Lock-free write - ConcurrentHashMap handles concurrency
+        putInternal(key, value, RemovalCause.REPLACED);
     }
 
     /**
-     * Internal put method that must be called with write lock held.
+     * Internal put method - lock-free, relies on ConcurrentHashMap.
      */
     private void putInternal(K key, V value, RemovalCause replacementCause) {
         CacheEntry<V> oldEntry = storage.get(key);
@@ -580,18 +517,13 @@ public class ConcurrentCacheImpl<K, V> implements LoadingCache<K, V>, CacheMetri
     public void invalidate(K key) {
         Objects.requireNonNull(key, "key cannot be null");
 
-        ReentrantReadWriteLock lock = getOrCreateLock(key);
-        lock.writeLock().lock();
-        try {
-            CacheEntry<V> removed = storage.remove(key);
-            if (removed != null) {
-                // Subtract the removed entry's weight
-                currentWeight.addAndGet(-removed.getWeight());
-                removeFromEvictionQueues(key);
-                fireRemovalEvent(key, removed.getValue(), RemovalCause.EXPLICIT);
-            }
-        } finally {
-            lock.writeLock().unlock();
+        // Lock-free removal - ConcurrentHashMap handles concurrency
+        CacheEntry<V> removed = storage.remove(key);
+        if (removed != null) {
+            // Subtract the removed entry's weight
+            currentWeight.addAndGet(-removed.getWeight());
+            removeFromEvictionQueues(key);
+            fireRemovalEvent(key, removed.getValue(), RemovalCause.EXPLICIT);
         }
     }
 
@@ -643,22 +575,17 @@ public class ConcurrentCacheImpl<K, V> implements LoadingCache<K, V>, CacheMetri
             }
         }
 
-        // Remove expired entries
+        // Remove expired entries - lock-free
         for (K key : keysToRemove) {
-            ReentrantReadWriteLock lock = getOrCreateLock(key);
-            lock.writeLock().lock();
-            try {
-                CacheEntry<V> entry = storage.get(key);
-                if (entry != null && isExpired(entry)) {
-                    storage.remove(key);
-                    // Subtract the expired entry's weight
-                    currentWeight.addAndGet(-entry.getWeight());
-                    removeFromEvictionQueues(key);
-                    fireRemovalEvent(key, entry.getValue(), RemovalCause.EXPIRED);
-                    if (recordStats) evictionCount.incrementAndGet();
-                }
-            } finally {
-                lock.writeLock().unlock();
+            // Double-check entry still exists and is expired
+            CacheEntry<V> entry = storage.get(key);
+            if (entry != null && isExpired(entry)) {
+                storage.remove(key);
+                // Subtract the expired entry's weight
+                currentWeight.addAndGet(-entry.getWeight());
+                removeFromEvictionQueues(key);
+                fireRemovalEvent(key, entry.getValue(), RemovalCause.EXPIRED);
+                if (recordStats) evictionCount.incrementAndGet();
             }
         }
     }
@@ -675,10 +602,6 @@ public class ConcurrentCacheImpl<K, V> implements LoadingCache<K, V>, CacheMetri
     }
 
     // Helper methods
-
-    private ReentrantReadWriteLock getOrCreateLock(K key) {
-        return keyLocks.computeIfAbsent(key, k -> new ReentrantReadWriteLock());
-    }
 
     private boolean isExpired(CacheEntry<V> entry) {
         if (expireAfterWriteNanos > 0 && entry.isExpired()) {
@@ -821,9 +744,9 @@ public class ConcurrentCacheImpl<K, V> implements LoadingCache<K, V>, CacheMetri
             return;
         }
 
-        // Check both size and weight constraints
-        int failedAttempts = 0;
-        int maxFailedAttempts = 10; // Prevent infinite loops
+        // Check both size and weight constraints - lock-free
+        int attempts = 0;
+        int maxAttempts = 10; // Prevent infinite loops
         while ((maximumSize > 0 && storage.size() > maximumSize) ||
                (maximumWeight > 0 && currentWeight.get() > maximumWeight)) {
             K keyToEvict = selectKeyToEvict();
@@ -831,33 +754,25 @@ public class ConcurrentCacheImpl<K, V> implements LoadingCache<K, V>, CacheMetri
                 break;
             }
 
-            ReentrantReadWriteLock lock = getOrCreateLock(keyToEvict);
-            if (lock.writeLock().tryLock()) {
-                try {
-                    CacheEntry<V> removed = storage.remove(keyToEvict);
-                    if (removed != null) {
-                        // Subtract the evicted entry's weight
-                        currentWeight.addAndGet(-removed.getWeight());
-                        removeFromEvictionQueues(keyToEvict);
-                        fireRemovalEvent(keyToEvict, removed.getValue(), RemovalCause.SIZE);
-                        if (recordStats) evictionCount.incrementAndGet();
-                        if (LOGGER.isLoggable(Level.FINE)) {
-                            LOGGER.fine("Evicted entry due to size/weight limit: key=" + keyToEvict +
-                                       ", policy=" + evictionPolicy + ", size=" + storage.size() +
-                                       ", weight=" + currentWeight.get());
-                        }
-                        failedAttempts = 0; // Reset on successful eviction
-                    }
-                } finally {
-                    lock.writeLock().unlock();
+            // Lock-free eviction
+            CacheEntry<V> removed = storage.remove(keyToEvict);
+            if (removed != null) {
+                // Subtract the evicted entry's weight
+                currentWeight.addAndGet(-removed.getWeight());
+                removeFromEvictionQueues(keyToEvict);
+                fireRemovalEvent(keyToEvict, removed.getValue(), RemovalCause.SIZE);
+                if (recordStats) evictionCount.incrementAndGet();
+                if (LOGGER.isLoggable(Level.FINE)) {
+                    LOGGER.fine("Evicted entry due to size/weight limit: key=" + keyToEvict +
+                               ", policy=" + evictionPolicy + ", size=" + storage.size() +
+                               ", weight=" + currentWeight.get());
                 }
-            } else {
-                // Couldn't acquire lock, increment failed attempts
-                failedAttempts++;
-                if (failedAttempts >= maxFailedAttempts) {
-                    // Give up to prevent infinite loop
-                    break;
-                }
+            }
+
+            attempts++;
+            if (attempts >= maxAttempts) {
+                // Give up to prevent infinite loop
+                break;
             }
         }
     }
@@ -1073,34 +988,28 @@ public class ConcurrentCacheImpl<K, V> implements LoadingCache<K, V>, CacheMetri
             V newValue = loader.load(key);
 
             if (newValue != null) {
-                // Update the entry with new value
-                ReentrantReadWriteLock lock = getOrCreateLock(key);
-                lock.writeLock().lock();
-                try {
-                    // Check if entry still exists and wasn't replaced
-                    CacheEntry<V> currentEntry = storage.get(key);
-                    if (currentEntry != null && currentEntry.getLastRefreshTime() == oldEntry.getLastRefreshTime()) {
-                        // Update with new entry
-                        long ttl = getTtlForEntry(key, newValue, currentEntry);
-                        CacheEntry<V> newEntry = new CacheEntry<>(newValue, ttl);
-                        newEntry.updateLastRefreshTime();
-                        storage.put(key, newEntry);
+                // Update the entry with new value - lock-free
+                // Check if entry still exists and wasn't replaced
+                CacheEntry<V> currentEntry = storage.get(key);
+                if (currentEntry != null && currentEntry.getLastRefreshTime() == oldEntry.getLastRefreshTime()) {
+                    // Update with new entry
+                    long ttl = getTtlForEntry(key, newValue, currentEntry);
+                    CacheEntry<V> newEntry = new CacheEntry<>(newValue, ttl);
+                    newEntry.updateLastRefreshTime();
+                    storage.put(key, newEntry);
 
-                        if (LOGGER.isLoggable(Level.FINE)) {
-                            LOGGER.fine("Successfully refreshed entry in background: key=" + key);
-                        }
+                    if (LOGGER.isLoggable(Level.FINE)) {
+                        LOGGER.fine("Successfully refreshed entry in background: key=" + key);
+                    }
 
-                        // Notify refresh policy
-                        if (refreshPolicy != null) {
-                            try {
-                                refreshPolicy.onRefreshSuccess(key, oldEntry.getValue(), newValue, System.nanoTime());
-                            } catch (Exception e) {
-                                // Ignore callback errors
-                            }
+                    // Notify refresh policy
+                    if (refreshPolicy != null) {
+                        try {
+                            refreshPolicy.onRefreshSuccess(key, oldEntry.getValue(), newValue, System.nanoTime());
+                        } catch (Exception e) {
+                            // Ignore callback errors
                         }
                     }
-                } finally {
-                    lock.writeLock().unlock();
                 }
             }
         } catch (Exception e) {
