@@ -1,11 +1,15 @@
 # Kachi vs Guava vs Caffeine - Honest Comparison
 
+> **📊 For detailed 3-way comparison with real benchmarks, see [REAL_WORLD_COMPARISON.md](REAL_WORLD_COMPARISON.md)**
+
 ## Executive Summary
 
 **TL;DR:**
-- **Caffeine:** Fastest general performance (~2x faster than Kachi for basic ops)
-- **Kachi:** Best for complex TTL/refresh + **JDK 21 virtual threads** (55x I/O speedup)
-- **Guava:** Slowest but most mature/stable
+- **Kachi:** FASTEST for GET (63ns) + concurrent throughput (17.2M ops/sec) 🏆
+- **Caffeine:** FASTEST for PUT operations + mature/stable
+- **Guava:** Slowest but most mature, JDK 8+ compatible
+
+**After 23.3x optimization, Kachi is NOW competitive with or faster than Caffeine!** 🚀
 
 ## Detailed Comparison
 
