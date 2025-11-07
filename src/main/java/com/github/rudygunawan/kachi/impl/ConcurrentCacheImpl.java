@@ -154,10 +154,12 @@ public class ConcurrentCacheImpl<K, V> implements LoadingCache<K, V>, CacheMetri
         }
 
         // Start scheduled TTL cleanup task (runs every minute)
+        // JDK 21: Using virtual threads for lightweight, scalable concurrency
         if (expireAfterWriteNanos > 0 || expireAfterAccessNanos > 0 || expiry != null) {
             this.cleanupScheduler = Executors.newSingleThreadScheduledExecutor(r -> {
-                Thread t = new Thread(r, "kachi-cache-cleanup");
-                t.setDaemon(true);
+                Thread t = Thread.ofVirtual()
+                    .name("kachi-cache-cleanup")
+                    .unstarted(r);
                 return t;
             });
             this.cleanupTask = cleanupScheduler.scheduleAtFixedRate(
@@ -170,10 +172,12 @@ public class ConcurrentCacheImpl<K, V> implements LoadingCache<K, V>, CacheMetri
         }
 
         // Start scheduled refresh task (runs every 30 seconds) - only for LoadingCache
+        // JDK 21: Using virtual threads for unlimited concurrent refreshes
         if (loader != null && (refreshPolicy != null || refreshAfterWriteNanos > 0)) {
             this.refreshScheduler = Executors.newSingleThreadScheduledExecutor(r -> {
-                Thread t = new Thread(r, "kachi-cache-refresh");
-                t.setDaemon(true);
+                Thread t = Thread.ofVirtual()
+                    .name("kachi-cache-refresh")
+                    .unstarted(r);
                 return t;
             });
             this.refreshTask = refreshScheduler.scheduleAtFixedRate(
@@ -437,36 +441,42 @@ public class ConcurrentCacheImpl<K, V> implements LoadingCache<K, V>, CacheMetri
                 }
             } else {
                 // Multiple keys - load in parallel for better performance
-                List<CompletableFuture<Map.Entry<K, V>>> futures = new ArrayList<>();
-                for (K key : keysToLoad) {
-                    CompletableFuture<Map.Entry<K, V>> future = CompletableFuture.supplyAsync(() -> {
-                        try {
-                            V value = get(key);
-                            return new AbstractMap.SimpleEntry<>(key, value);
-                        } catch (Exception ex) {
-                            return null; // Skip on error
-                        }
-                    });
-                    futures.add(future);
-                }
-
-                // Wait for all loads to complete
-                CompletableFuture<Void> allFutures = CompletableFuture.allOf(
-                    futures.toArray(new CompletableFuture[0])
-                );
-
+                // JDK 21: Using virtual threads for unlimited parallel loads (no thread pool limit!)
+                ExecutorService virtualExecutor = Executors.newVirtualThreadPerTaskExecutor();
                 try {
-                    allFutures.get(); // Wait for completion
-
-                    // Collect results
-                    for (CompletableFuture<Map.Entry<K, V>> future : futures) {
-                        Map.Entry<K, V> entry = future.get();
-                        if (entry != null && entry.getValue() != null) {
-                            result.put(entry.getKey(), entry.getValue());
-                        }
+                    List<CompletableFuture<Map.Entry<K, V>>> futures = new ArrayList<>();
+                    for (K key : keysToLoad) {
+                        CompletableFuture<Map.Entry<K, V>> future = CompletableFuture.supplyAsync(() -> {
+                            try {
+                                V value = get(key);
+                                return new AbstractMap.SimpleEntry<>(key, value);
+                            } catch (Exception ex) {
+                                return null; // Skip on error
+                            }
+                        }, virtualExecutor); // Use virtual thread executor
+                        futures.add(future);
                     }
-                } catch (Exception ex) {
-                    // Some loads failed, but we already collected successful ones
+
+                    // Wait for all loads to complete
+                    CompletableFuture<Void> allFutures = CompletableFuture.allOf(
+                        futures.toArray(new CompletableFuture[0])
+                    );
+
+                    try {
+                        allFutures.get(); // Wait for completion
+
+                        // Collect results
+                        for (CompletableFuture<Map.Entry<K, V>> future : futures) {
+                            Map.Entry<K, V> entry = future.get();
+                            if (entry != null && entry.getValue() != null) {
+                                result.put(entry.getKey(), entry.getValue());
+                            }
+                        }
+                    } catch (Exception ex) {
+                        // Some loads failed, but we already collected successful ones
+                    }
+                } finally {
+                    virtualExecutor.shutdown(); // Clean up virtual thread executor
                 }
             }
         }
@@ -482,6 +492,7 @@ public class ConcurrentCacheImpl<K, V> implements LoadingCache<K, V>, CacheMetri
 
         Objects.requireNonNull(key, "key cannot be null");
 
+        // JDK 21: Use virtual thread for async refresh - lightweight and scalable
         CompletableFuture.runAsync(() -> {
             try {
                 V newValue = loader.load(key);
@@ -491,7 +502,7 @@ public class ConcurrentCacheImpl<K, V> implements LoadingCache<K, V>, CacheMetri
             } catch (Exception e) {
                 // Log and swallow as per contract
             }
-        });
+        }, Executors.newVirtualThreadPerTaskExecutor());
     }
 
     @Override

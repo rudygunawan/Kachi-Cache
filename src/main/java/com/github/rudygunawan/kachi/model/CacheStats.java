@@ -1,9 +1,7 @@
 package com.github.rudygunawan.kachi.model;
 
-import java.util.Objects;
-
 /**
- * Statistics about the performance of a {@link Cache}. Instances of this class are immutable.
+ * Statistics about the performance of a {@link Cache}. Instances of this record are immutable.
  *
  * <p>Cache statistics are incremented according to the following rules:
  *
@@ -15,32 +13,16 @@ import java.util.Objects;
  *       {@code loadFailureCount} are incremented.
  *   <li>When an entry is evicted from the cache, {@code evictionCount} is incremented.
  * </ul>
+ *
+ * <p><b>JDK 21: This class is now a record for improved performance and memory efficiency.</b>
  */
-public class CacheStats {
-    private final long hitCount;
-    private final long missCount;
-    private final long loadSuccessCount;
-    private final long loadFailureCount;
-    private final long totalLoadTime;
-    private final long evictionCount;
-
-    /**
-     * Constructs a new {@code CacheStats} instance.
-     */
-    public CacheStats(
-            long hitCount,
-            long missCount,
-            long loadSuccessCount,
-            long loadFailureCount,
-            long totalLoadTime,
-            long evictionCount) {
-        this.hitCount = hitCount;
-        this.missCount = missCount;
-        this.loadSuccessCount = loadSuccessCount;
-        this.loadFailureCount = loadFailureCount;
-        this.totalLoadTime = totalLoadTime;
-        this.evictionCount = evictionCount;
-    }
+public record CacheStats(
+        long hitCount,
+        long missCount,
+        long loadSuccessCount,
+        long loadFailureCount,
+        long totalLoadTime,
+        long evictionCount) {
 
     /**
      * Returns the number of times {@link Cache} lookup methods have returned either a cached or
@@ -51,27 +33,12 @@ public class CacheStats {
     }
 
     /**
-     * Returns the number of times {@link Cache} lookup methods have returned a cached value.
-     */
-    public long hitCount() {
-        return hitCount;
-    }
-
-    /**
      * Returns the ratio of cache requests which were hits. This is defined as
      * {@code hitCount / requestCount}, or {@code 1.0} when {@code requestCount == 0}.
      */
     public double hitRate() {
         long requestCount = requestCount();
         return (requestCount == 0) ? 1.0 : (double) hitCount / requestCount;
-    }
-
-    /**
-     * Returns the number of times {@link Cache} lookup methods have returned an uncached (newly
-     * loaded) value, or null.
-     */
-    public long missCount() {
-        return missCount;
     }
 
     /**
@@ -92,21 +59,6 @@ public class CacheStats {
     }
 
     /**
-     * Returns the number of times {@link Cache} lookup methods have successfully loaded a new value.
-     */
-    public long loadSuccessCount() {
-        return loadSuccessCount;
-    }
-
-    /**
-     * Returns the number of times {@link Cache} lookup methods threw an exception while loading a
-     * new value.
-     */
-    public long loadFailureCount() {
-        return loadFailureCount;
-    }
-
-    /**
      * Returns the ratio of cache loading attempts which threw exceptions. This is defined as
      * {@code loadFailureCount / (loadSuccessCount + loadFailureCount)}, or {@code 0.0} when
      * {@code loadSuccessCount + loadFailureCount == 0}.
@@ -117,26 +69,12 @@ public class CacheStats {
     }
 
     /**
-     * Returns the total number of nanoseconds the cache has spent loading new values.
-     */
-    public long totalLoadTime() {
-        return totalLoadTime;
-    }
-
-    /**
      * Returns the average time spent loading new values. This is defined as
      * {@code totalLoadTime / (loadSuccessCount + loadFailureCount)}.
      */
     public double averageLoadPenalty() {
         long totalLoadCount = loadSuccessCount + loadFailureCount;
         return (totalLoadCount == 0) ? 0.0 : (double) totalLoadTime / totalLoadCount;
-    }
-
-    /**
-     * Returns the number of times an entry has been evicted.
-     */
-    public long evictionCount() {
-        return evictionCount;
     }
 
     /**
@@ -167,28 +105,10 @@ public class CacheStats {
                 evictionCount + other.evictionCount);
     }
 
-    @Override
-    public int hashCode() {
-        return Objects.hash(hitCount, missCount, loadSuccessCount, loadFailureCount, totalLoadTime, evictionCount);
-    }
-
-    @Override
-    public boolean equals(Object obj) {
-        if (obj == this) {
-            return true;
-        }
-        if (!(obj instanceof CacheStats)) {
-            return false;
-        }
-        CacheStats other = (CacheStats) obj;
-        return hitCount == other.hitCount
-                && missCount == other.missCount
-                && loadSuccessCount == other.loadSuccessCount
-                && loadFailureCount == other.loadFailureCount
-                && totalLoadTime == other.totalLoadTime
-                && evictionCount == other.evictionCount;
-    }
-
+    /**
+     * Returns a string representation with formatted hit rate percentage.
+     * Note: Records provide default toString(), but we override for better formatting.
+     */
     @Override
     public String toString() {
         return "CacheStats{"
