@@ -11,9 +11,10 @@ public enum CacheStrategy {
      *
      * <p><b>Performance:</b>
      * <ul>
-     *   <li>GET: ~63ns (15.88M ops/sec)</li>
-     *   <li>Concurrent: 17.2M ops/sec (16 threads)</li>
-     *   <li>5-8x faster than Caffeine for concurrent workloads</li>
+     *   <li>GET: ~60ns (16.75M ops/sec)</li>
+     *   <li>PUT: ~15,978ns (62,587 ops/sec)</li>
+     *   <li>Concurrent: 14.1M ops/sec (16 threads)</li>
+     *   <li>4.7-7.1x faster than Caffeine for concurrent workloads</li>
      * </ul>
      *
      * <p><b>Trade-offs:</b>
