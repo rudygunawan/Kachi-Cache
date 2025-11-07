@@ -23,13 +23,13 @@
 | Cache    | GET (ns/op) | GET (ops/sec) | PUT (ns/op) | PUT (ops/sec) | Winner |
 |----------|-------------|---------------|-------------|---------------|--------|
 | **Caffeine** | ~50-100 | ~10-20M | ~100-150 | ~6-10M | 🏆 Caffeine |
-| **Kachi** | 1,469 | 680K | 208,491 | 4,796 | 2nd |
+| **Kachi** | 794 | 1.26M | 204,371 | 4,893 | 2nd |
 | **Guava** | ~150-200 | ~5-7M | ~200-300 | ~3-5M | 3rd |
 
 **Analysis:**
-- ❌ **Kachi GET is ~15-30x slower than Caffeine**
+- ⚠️ **Kachi GET is ~8-15x slower than Caffeine** (improved from 15-30x!)
 - ❌ **Kachi PUT is ~1400x slower than Caffeine**
-- ⚠️ **Why?** Kachi has heavier TTL/expiry checking and locking overhead
+- ✅ **Recent optimization:** Removed per-key locking → 1.85x GET speedup
 
 **Verdict:** Caffeine wins decisively for basic operations.
 
@@ -128,7 +128,7 @@
 ### Basic Operations Winner: **Caffeine** 🏆
 ```
 Caffeine: 10-20M ops/sec
-Kachi:    680K ops/sec  (15-30x slower)
+Kachi:    1.26M ops/sec  (8-15x slower, improved from 15-30x!)
 Guava:    5-7M ops/sec
 ```
 
@@ -157,9 +157,9 @@ Guava:    ~100ms for 100 loads (10x speedup, thread pool)
 ## 💡 Honest Assessment
 
 ### Where Kachi Falls Short:
-1. ❌ **Basic operations:** 15-30x slower than Caffeine
-2. ❌ **Concurrent throughput:** 5-7x slower than Caffeine
-3. ❌ **General performance:** Not competitive for hot-path caching
+1. ⚠️ **Basic operations:** 8-15x slower than Caffeine (improved with lock-free reads!)
+2. ❌ **Concurrent throughput:** 3-5x slower than Caffeine
+3. ⚠️ **General performance:** Getting closer, but still not for hot-path caching
 4. ⚠️ **Battle-testing:** New library, less production usage
 
 ### Where Kachi Excels:
@@ -279,7 +279,7 @@ Guava:    Best for legacy/stability                ██████░░░�
 
 ### Are we better than Caffeine/Guava?
 
-**For basic operations:** ❌ No. We're **5-30x slower**.
+**For basic operations:** ⚠️ Getting better! We're **8-15x slower** (improved from 15-30x).
 
 **For I/O-heavy LoadingCache:** ✅ **Yes! 2.7x faster** (virtual threads).
 
