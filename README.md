@@ -99,7 +99,7 @@ Kachi Cache leverages modern Java features for enhanced performance:
 - **Records**: Immutable `CacheStats` with optimized memory layout (10-20% faster stats snapshots)
 - **Better Performance**: 15-30% general throughput improvement from JDK 21 runtime optimizations
 
-See [JDK17_IMPROVEMENTS.md](docs/JDK17_IMPROVEMENTS.md) for detailed performance analysis.
+See [JDK21_FEATURES.md](docs/JDK21_FEATURES.md) for detailed feature breakdown and performance analysis.
 
 ## Requirements
 

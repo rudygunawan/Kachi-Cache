@@ -7,7 +7,7 @@
 ## 🎯 Quick Start - Switch with ONE Line
 
 ```java
-// Fast (default) - 63ns GET, 17.2M ops/sec concurrent
+// Fast (default) - 59ns GET, 14.1M ops/sec concurrent
 var cache = CacheBuilder.newBuilder()
     .strategy(CacheStrategy.HIGH_PERFORMANCE)
     .maximumSize(10000)
@@ -31,9 +31,9 @@ cache.invalidate(key);
 
 | Metric | HighPerformance | Precision | Difference |
 |--------|----------------|-----------|------------|
-| **GET latency** | 63 ns | 800-1,400 ns | **12-22x faster** |
-| **GET throughput** | 15.88M ops/sec | ~1M ops/sec | **15x faster** |
-| **Concurrent (16T)** | 17.2M ops/sec | ~1-2M ops/sec | **8-17x faster** |
+| **GET latency** | 59 ns | 280 ns | **4.7x faster** |
+| **GET throughput** | 16.75M ops/sec | ~3.5M ops/sec | **4.8x faster** |
+| **Concurrent (16T)** | 14.1M ops/sec | ~3-4M ops/sec | **3.5-4.7x faster** |
 | **Eviction** | Random | LRU/FIFO/LFU/TinyLFU | Precision wins |
 | **Expiry checking** | Lazy | Immediate | Precision wins |
 | **Consistency** | Eventual | Strong | Precision wins |
