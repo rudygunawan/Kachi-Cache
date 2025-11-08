@@ -1,5 +1,7 @@
 # Kachi Cache
 
+## Currently Alpha version (0.1.0). Feel free to try and give feedback!
+
 **Kachi** (カチ) - _pronounced "kah-chee"_
 
 A high-performance Java cache library inspired by Google Guava and Caffeine, with support for TTL (time-to-live), lazy loading, and excellent concurrent performance.
