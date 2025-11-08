@@ -63,12 +63,42 @@ public class HighPerformanceCacheImpl<K, V> implements LoadingCache<K, V>, Cache
      */
     private static final Logger LOGGER = Logger.getLogger("com.github.rudygunawan.kachi.Cache");
 
-    // Idle threshold - entries not accessed in last 5 minutes are considered idle
-    private static final long IDLE_THRESHOLD_NANOS = 5L * 60 * 1_000_000_000; // 5 minutes
+    // Time constants (in nanoseconds)
+    private static final long NANOS_PER_MINUTE = 60_000_000_000L;
+    private static final long NANOS_PER_HOUR = 60 * NANOS_PER_MINUTE;
+    private static final long NANOS_PER_DAY = 24 * NANOS_PER_HOUR;
+    private static final long IDLE_THRESHOLD_NANOS = 5 * NANOS_PER_MINUTE;
 
     // Deferred eviction settings for PUT optimization
-    private static final int EVICTION_BATCH_SIZE = 16;  // Evict multiple at once
-    private static final double EVICTION_TOLERANCE = 1.05;  // 5% over capacity before evicting
+    private static final int EVICTION_CHECK_FREQUENCY = 100;  // Check eviction every N PUTs
+    private static final int EVICTION_BATCH_SIZE = 16;  // Evict multiple entries at once
+    private static final double EVICTION_TOLERANCE = 1.05;  // Allow 5% over capacity before evicting
+    private static final int MAX_EVICTION_ATTEMPTS = 10;  // Prevent infinite eviction loops
+    private static final int EVICTION_SAMPLE_SIZE = 20;  // Sample size for random eviction candidate
+
+    // ConcurrentHashMap configuration
+    private static final float HASH_MAP_LOAD_FACTOR = 0.75f;
+
+    // Window TinyLFU segment percentages
+    private static final double WINDOW_SEGMENT_PERCENT = 0.01;  // 1% for window segment
+    private static final double PROTECTED_SEGMENT_PERCENT = 0.8;  // 80% of main cache
+    private static final int MIN_WINDOW_SIZE = 1;
+
+    // Scheduler intervals
+    private static final long CLEANUP_INTERVAL_MINUTES = 1;
+    private static final long REFRESH_CHECK_INTERVAL_MS = 30_000;  // 30 seconds
+
+    // Memory estimation constants (rough approximations)
+    private static final long HASH_MAP_NODE_OVERHEAD_BYTES = 64;
+    private static final long CACHE_ENTRY_OVERHEAD_BYTES = 80;
+    private static final long AVERAGE_KEY_VALUE_SIZE_BYTES = 100;
+
+    // Time thresholds for expiry distribution
+    private static final long EXPIRY_1_MINUTE = NANOS_PER_MINUTE;
+    private static final long EXPIRY_5_MINUTES = 5 * NANOS_PER_MINUTE;
+    private static final long EXPIRY_15_MINUTES = 15 * NANOS_PER_MINUTE;
+    private static final long EXPIRY_1_HOUR = NANOS_PER_HOUR;
+    private static final long EXPIRY_24_HOURS = NANOS_PER_DAY;
 
     private final ConcurrentHashMap<K, FastCacheEntry<V>> storage;
     private final AtomicLong putsSinceEviction = new AtomicLong(0);  // Track PUTs for deferred eviction
@@ -112,12 +142,6 @@ public class HighPerformanceCacheImpl<K, V> implements LoadingCache<K, V>, Cache
     private final ScheduledExecutorService refreshScheduler;
     private final ScheduledFuture<?> refreshTask;
 
-    // Read timeout for write-priority
-    private static final long READ_TIMEOUT_MS = 1000;
-
-    // Refresh check interval (check every 30 seconds)
-    private static final long REFRESH_CHECK_INTERVAL_MS = 30_000;
-
     /**
      * Constructor for non-loading cache.
      */
@@ -130,7 +154,11 @@ public class HighPerformanceCacheImpl<K, V> implements LoadingCache<K, V>, Cache
      */
     @SuppressWarnings("unchecked")
     public HighPerformanceCacheImpl(CacheBuilder<?, ?> builder, CacheLoader<? super K, V> loader) {
-        this.storage = new ConcurrentHashMap<>(builder.getInitialCapacity(), 0.75f, builder.getConcurrencyLevel());
+        this.storage = new ConcurrentHashMap<>(
+            builder.getInitialCapacity(),
+            HASH_MAP_LOAD_FACTOR,
+            builder.getConcurrencyLevel()
+        );
         this.loader = loader;
         this.maximumSize = builder.getMaximumSize();
         this.maximumWeight = builder.getMaximumWeight();
@@ -146,12 +174,10 @@ public class HighPerformanceCacheImpl<K, V> implements LoadingCache<K, V>, Cache
 
         // Initialize Window TinyLFU segments if that policy is selected
         if (evictionPolicy == EvictionPolicy.WINDOW_TINY_LFU && maximumSize > 0) {
-            // Calculate segment sizes
-            // Window: 1% of cache (minimum 1)
-            this.windowMaxSize = Math.max(1, (int) (maximumSize * 0.01));
-            // Main cache: 99% split into Protected (80%) and Probation (20%)
+            // Calculate segment sizes using Window TinyLFU algorithm
+            this.windowMaxSize = Math.max(MIN_WINDOW_SIZE, (int) (maximumSize * WINDOW_SEGMENT_PERCENT));
             int mainCacheSize = (int) (maximumSize - windowMaxSize);
-            this.protectedMaxSize = (int) (mainCacheSize * 0.8);
+            this.protectedMaxSize = (int) (mainCacheSize * PROTECTED_SEGMENT_PERCENT);
             this.probationMaxSize = mainCacheSize - protectedMaxSize;
 
             // Initialize frequency sketch only (deques removed for performance)
@@ -164,32 +190,22 @@ public class HighPerformanceCacheImpl<K, V> implements LoadingCache<K, V>, Cache
         }
 
         // Start scheduled TTL cleanup task (runs every minute)
-        // JDK 21: Using virtual threads for lightweight, scalable concurrency
         if (expireAfterWriteNanos > 0 || expireAfterAccessNanos > 0 || expiry != null) {
-            this.cleanupScheduler = Executors.newSingleThreadScheduledExecutor(r -> {
-                Thread t = Thread.ofVirtual()
-                    .name("kachi-cache-cleanup")
-                    .unstarted(r);
-                return t;
-            });
+            this.cleanupScheduler = createVirtualThreadScheduler("kachi-cache-cleanup");
             this.cleanupTask = cleanupScheduler.scheduleAtFixedRate(
                     this::cleanUp,
-                    1, 1, TimeUnit.MINUTES
+                    CLEANUP_INTERVAL_MINUTES,
+                    CLEANUP_INTERVAL_MINUTES,
+                    TimeUnit.MINUTES
             );
         } else {
             this.cleanupScheduler = null;
             this.cleanupTask = null;
         }
 
-        // Start scheduled refresh task (runs every 30 seconds) - only for LoadingCache
-        // JDK 21: Using virtual threads for unlimited concurrent refreshes
+        // Start scheduled refresh task - only for LoadingCache with refresh policy
         if (loader != null && (refreshPolicy != null || refreshAfterWriteNanos > 0)) {
-            this.refreshScheduler = Executors.newSingleThreadScheduledExecutor(r -> {
-                Thread t = Thread.ofVirtual()
-                    .name("kachi-cache-refresh")
-                    .unstarted(r);
-                return t;
-            });
+            this.refreshScheduler = createVirtualThreadScheduler("kachi-cache-refresh");
             this.refreshTask = refreshScheduler.scheduleAtFixedRate(
                     this::refreshEntries,
                     REFRESH_CHECK_INTERVAL_MS,
@@ -506,9 +522,9 @@ public class HighPerformanceCacheImpl<K, V> implements LoadingCache<K, V>, Cache
         }
 
         // Deferred eviction (HUGE savings: ~1,000-15,000ns)
-        // Only check every 100 PUTs OR when 5% over capacity
+        // Only check periodically OR when significantly over capacity
         long puts = putsSinceEviction.incrementAndGet();
-        if (puts >= 100 || isSignificantlyOverCapacity()) {
+        if (puts >= EVICTION_CHECK_FREQUENCY || isSignificantlyOverCapacity()) {
             putsSinceEviction.set(0);
             evictIfNecessary();
         }
@@ -770,33 +786,44 @@ public class HighPerformanceCacheImpl<K, V> implements LoadingCache<K, V>, Cache
 
         // Check both size and weight constraints - lock-free
         int attempts = 0;
-        int maxAttempts = 10; // Prevent infinite loops
-        while ((maximumSize > 0 && storage.size() > maximumSize) ||
-               (maximumWeight > 0 && currentWeight.get() > maximumWeight)) {
+        while (isOverCapacity() && attempts < MAX_EVICTION_ATTEMPTS) {
             K keyToEvict = selectKeyToEvict();
             if (keyToEvict == null) {
-                break;
+                break;  // No candidates available
             }
 
-            // Lock-free eviction
-            FastCacheEntry<V> removed = storage.remove(keyToEvict);
-            if (removed != null) {
-                // Subtract the evicted entry's weight
-                currentWeight.addAndGet(-removed.getWeight());
-                removeFromEvictionQueues(keyToEvict);
-                fireRemovalEvent(keyToEvict, removed.getValue(), RemovalCause.SIZE);
-                if (recordStats) evictionCount.incrementAndGet();
-                if (LOGGER.isLoggable(Level.FINE)) {
-                    LOGGER.fine("Evicted entry due to size/weight limit: key=" + keyToEvict +
-                               ", policy=" + evictionPolicy + ", size=" + storage.size() +
-                               ", weight=" + currentWeight.get());
-                }
-            }
-
+            evictEntry(keyToEvict);
             attempts++;
-            if (attempts >= maxAttempts) {
-                // Give up to prevent infinite loop
-                break;
+        }
+    }
+
+    /**
+     * Checks if cache is over its configured capacity limits.
+     */
+    private boolean isOverCapacity() {
+        return (maximumSize > 0 && storage.size() > maximumSize) ||
+               (maximumWeight > 0 && currentWeight.get() > maximumWeight);
+    }
+
+    /**
+     * Evicts a single entry from the cache.
+     * Handles weight tracking, removal listeners, and logging.
+     */
+    private void evictEntry(K key) {
+        FastCacheEntry<V> removed = storage.remove(key);
+        if (removed != null) {
+            currentWeight.addAndGet(-removed.getWeight());
+            removeFromEvictionQueues(key);
+            fireRemovalEvent(key, removed.getValue(), RemovalCause.SIZE);
+
+            if (recordStats) {
+                evictionCount.incrementAndGet();
+            }
+
+            if (LOGGER.isLoggable(Level.FINE)) {
+                LOGGER.fine("Evicted entry due to size/weight limit: key=" + key +
+                           ", policy=" + evictionPolicy + ", size=" + storage.size() +
+                           ", weight=" + currentWeight.get());
             }
         }
     }
@@ -808,29 +835,26 @@ public class HighPerformanceCacheImpl<K, V> implements LoadingCache<K, V>, Cache
     }
 
     /**
-     * Selects a random key for eviction (optimized for performance).
-     * Entries must be at least 1 second old to be evicted.
+     * Selects a random key for eviction using sampling (optimized for performance).
+     * Samples up to EVICTION_SAMPLE_SIZE entries and returns first eligible candidate.
      */
     private K selectRandomCandidate() {
-        // Fast random eviction: just iterate and pick first eligible entry
-        // ConcurrentHashMap iteration is pseudo-random enough
         long currentTime = System.nanoTime();
-        int attempts = 0;
-        int maxAttempts = Math.min(20, storage.size()); // Sample up to 20 entries
+        int sampleSize = Math.min(EVICTION_SAMPLE_SIZE, storage.size());
+        int samplesChecked = 0;
 
         for (Map.Entry<K, FastCacheEntry<V>> entry : storage.entrySet()) {
-            if (attempts++ >= maxAttempts) {
+            if (samplesChecked++ >= sampleSize) {
                 break;
             }
 
             FastCacheEntry<V> cacheEntry = entry.getValue();
-            // Only consider entries that are old enough
             if (cacheEntry != null && cacheEntry.isEligibleForEviction(currentTime)) {
                 return entry.getKey();
             }
         }
 
-        // If no eligible entries found in sample, just return any key
+        // No eligible entries found in sample - return any key as fallback
         return storage.isEmpty() ? null : storage.keys().nextElement();
     }
 
@@ -850,8 +874,20 @@ public class HighPerformanceCacheImpl<K, V> implements LoadingCache<K, V>, Cache
     }
 
     /**
-     * Shutdown the cleanup scheduler when cache is no longer needed.
+     * Creates a scheduled executor service using JDK 21 virtual threads.
+     * Virtual threads are lightweight and designed for I/O-bound tasks.
+     *
+     * @param threadName the name to assign to virtual threads
+     * @return a scheduled executor service using virtual threads
      */
+    private static ScheduledExecutorService createVirtualThreadScheduler(String threadName) {
+        return Executors.newSingleThreadScheduledExecutor(runnable ->
+            Thread.ofVirtual()
+                .name(threadName)
+                .unstarted(runnable)
+        );
+    }
+
     /**
      * Background task that checks all entries and refreshes those that need refreshing.
      * This runs periodically based on REFRESH_CHECK_INTERVAL_MS.
@@ -1021,20 +1057,11 @@ public class HighPerformanceCacheImpl<K, V> implements LoadingCache<K, V>, Cache
 
     @Override
     public long estimatedMemoryUsageBytes() {
-        // Rough estimation:
-        // - Each ConcurrentHashMap entry: ~64 bytes (node overhead)
-        // - Each CacheEntry object: ~80 bytes (object header + fields)
-        // - Key and value size is application-specific, using rough estimate
-        // - This is a very rough approximation
-
+        // Rough estimation - applications should override with actual measurements if accuracy is critical
         long entryCount = storage.size();
-        long perEntryOverhead = 64 + 80; // HashMap node + CacheEntry
+        long perEntryOverhead = HASH_MAP_NODE_OVERHEAD_BYTES + CACHE_ENTRY_OVERHEAD_BYTES;
 
-        // Assume average key + value size of 100 bytes (very rough)
-        // Applications can override this with custom metrics if needed
-        long averageKeyValueSize = 100;
-
-        return entryCount * (perEntryOverhead + averageKeyValueSize);
+        return entryCount * (perEntryOverhead + AVERAGE_KEY_VALUE_SIZE_BYTES);
     }
 
     @Override
@@ -1059,31 +1086,16 @@ public class HighPerformanceCacheImpl<K, V> implements LoadingCache<K, V>, Cache
         long neverExpires = 0;
 
         for (FastCacheEntry<V> entry : storage.values()) {
-            long expirationTime = entry.getExpirationTime();
+            ExpiryBucket bucket = categorizeEntryExpiry(entry, now);
 
-            // Check if entry never expires
-            if (expirationTime == Long.MAX_VALUE) {
-                neverExpires++;
-                continue;
-            }
-
-            long timeUntilExpiry = expirationTime - now;
-
-            // Entry already expired
-            if (timeUntilExpiry <= 0) {
-                lessThan1Min++;
-            } else if (timeUntilExpiry < 60_000_000_000L) { // < 1 minute
-                lessThan1Min++;
-            } else if (timeUntilExpiry < 5 * 60_000_000_000L) { // < 5 minutes
-                lessThan5Min++;
-            } else if (timeUntilExpiry < 15 * 60_000_000_000L) { // < 15 minutes
-                lessThan15Min++;
-            } else if (timeUntilExpiry < 60 * 60_000_000_000L) { // < 1 hour
-                lessThan1Hour++;
-            } else if (timeUntilExpiry < 24 * 60 * 60_000_000_000L) { // < 24 hours
-                lessThan24Hours++;
-            } else { // > 24 hours
-                moreThan24Hours++;
+            switch (bucket) {
+                case NEVER -> neverExpires++;
+                case LESS_THAN_1_MIN -> lessThan1Min++;
+                case LESS_THAN_5_MIN -> lessThan5Min++;
+                case LESS_THAN_15_MIN -> lessThan15Min++;
+                case LESS_THAN_1_HOUR -> lessThan1Hour++;
+                case LESS_THAN_24_HOURS -> lessThan24Hours++;
+                case MORE_THAN_24_HOURS -> moreThan24Hours++;
             }
         }
 
@@ -1096,5 +1108,45 @@ public class HighPerformanceCacheImpl<K, V> implements LoadingCache<K, V>, Cache
                 moreThan24Hours,
                 neverExpires
         );
+    }
+
+    /**
+     * Categorizes an entry into an expiry time bucket.
+     */
+    private ExpiryBucket categorizeEntryExpiry(FastCacheEntry<V> entry, long currentTime) {
+        long expirationTime = entry.getExpirationTime();
+
+        if (expirationTime == Long.MAX_VALUE) {
+            return ExpiryBucket.NEVER;
+        }
+
+        long timeUntilExpiry = expirationTime - currentTime;
+
+        if (timeUntilExpiry <= 0 || timeUntilExpiry < EXPIRY_1_MINUTE) {
+            return ExpiryBucket.LESS_THAN_1_MIN;
+        } else if (timeUntilExpiry < EXPIRY_5_MINUTES) {
+            return ExpiryBucket.LESS_THAN_5_MIN;
+        } else if (timeUntilExpiry < EXPIRY_15_MINUTES) {
+            return ExpiryBucket.LESS_THAN_15_MIN;
+        } else if (timeUntilExpiry < EXPIRY_1_HOUR) {
+            return ExpiryBucket.LESS_THAN_1_HOUR;
+        } else if (timeUntilExpiry < EXPIRY_24_HOURS) {
+            return ExpiryBucket.LESS_THAN_24_HOURS;
+        } else {
+            return ExpiryBucket.MORE_THAN_24_HOURS;
+        }
+    }
+
+    /**
+     * Expiry time buckets for distribution categorization.
+     */
+    private enum ExpiryBucket {
+        NEVER,
+        LESS_THAN_1_MIN,
+        LESS_THAN_5_MIN,
+        LESS_THAN_15_MIN,
+        LESS_THAN_1_HOUR,
+        LESS_THAN_24_HOURS,
+        MORE_THAN_24_HOURS
     }
 }
