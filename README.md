@@ -54,6 +54,41 @@ In Japanese culture, onomatopoeia (擬音語 _giongo_) are deeply embedded in th
 - **Zero Dependencies**: Pure Java implementation with no external dependencies
 - **Configurable Logging**: Uses java.util.logging for zero-dependency, flexible log configuration
 
+### ⚙️ Dual Cache Strategies: Choose Your Trade-off
+
+Kachi provides **two cache implementations** optimized for different needs:
+
+#### 🚀 **HighPerformance Strategy** (Default)
+- **Maximum speed**: GET ~59ns, PUT ~15,749ns
+- **Excellent concurrency**: 14M ops/sec with 16 threads
+- **Lock-free reads**: No blocking on GET operations
+- **Best for**: Read-heavy workloads, high-traffic servers, microservices
+- **Trade-off**: Random eviction instead of strict LRU/FIFO
+
+#### 🎯 **Precision Strategy**
+- **Strict eviction policies**: True LRU, FIFO, LFU, or TinyLFU
+- **Immediate consistency**: Exact size enforcement
+- **Deterministic behavior**: Predictable for testing and compliance
+- **Best for**: Write-heavy workloads, compliance requirements, testing
+- **Trade-off**: 2-5x slower than HighPerformance
+
+**Switching is a one-line change:**
+```java
+// HighPerformance (default)
+Cache<K, V> cache = CacheBuilder.newBuilder()
+    .strategy(CacheStrategy.HIGH_PERFORMANCE)
+    .maximumSize(10000)
+    .build();
+
+// Precision
+Cache<K, V> cache = CacheBuilder.newBuilder()
+    .strategy(CacheStrategy.PRECISION)
+    .maximumSize(10000)
+    .build();
+```
+
+📖 **[Full Comparison Guide](docs/CACHE_STRATEGY_COMPARISON.md)** - Detailed performance benchmarks, feature comparison, and use case recommendations
+
 ### 🚀 JDK 21 Features
 
 Kachi Cache leverages modern Java features for enhanced performance:
