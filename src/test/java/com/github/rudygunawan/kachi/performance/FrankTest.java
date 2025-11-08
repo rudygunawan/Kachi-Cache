@@ -18,6 +18,16 @@ import java.util.stream.IntStream;
  *
  * <p><b>Frank Test gives you the frank truth about your cache performance.</b>
  *
+ * <p><b>⚙️ CACHE STRATEGY NOTE:</b>
+ * <p>This benchmark uses the <b>HighPerformance</b> cache strategy (default).
+ * For benchmarks with the <b>Precision</b> strategy (2-5x slower, strict LRU/FIFO):
+ * <ol>
+ *   <li>Add {@code .strategy(CacheStrategy.PRECISION)} to cache builders</li>
+ *   <li>Compare results side-by-side</li>
+ * </ol>
+ *
+ * <p>📖 See: <a href="../../../../../docs/CACHE_STRATEGY_COMPARISON.md">Cache Strategy Comparison Guide</a>
+ *
  * <p>Run this test directly to generate comprehensive performance reports:
  * <pre>
  * # Compile
@@ -53,6 +63,14 @@ public class FrankTest {
         System.out.println("╚═══════════════════════════════════════════════════════════════╝");
         System.out.println();
         System.out.println("\"Frank Test gives you the frank truth about cache performance.\"");
+        System.out.println();
+        System.out.println("⚙️  CACHE STRATEGY: HighPerformance (default)");
+        System.out.println("   - Maximum speed: GET ~59ns, PUT ~15,749ns");
+        System.out.println("   - Random eviction (not strict LRU)");
+        System.out.println("   - For Precision strategy (2-5x slower, strict LRU):");
+        System.out.println("     Add .strategy(CacheStrategy.PRECISION) to builders");
+        System.out.println();
+        System.out.println("📖 Comparison: docs/CACHE_STRATEGY_COMPARISON.md");
         System.out.println();
         System.out.println("Configuration:");
         System.out.println("  Warmup iterations: " + WARMUP_ITERATIONS);
