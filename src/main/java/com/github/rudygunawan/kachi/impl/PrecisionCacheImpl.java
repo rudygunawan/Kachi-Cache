@@ -6,6 +6,7 @@ import com.github.rudygunawan.kachi.api.LoadingCache;
 import com.github.rudygunawan.kachi.api.RefreshPolicy;
 import com.github.rudygunawan.kachi.api.Weigher;
 import com.github.rudygunawan.kachi.builder.CacheBuilder;
+import com.github.rudygunawan.kachi.listener.PutListener;
 import com.github.rudygunawan.kachi.listener.RemovalListener;
 import com.github.rudygunawan.kachi.metrics.CacheMetrics;
 import com.github.rudygunawan.kachi.metrics.ExpiryDistribution;
@@ -13,6 +14,7 @@ import com.github.rudygunawan.kachi.model.CacheEntry;
 import com.github.rudygunawan.kachi.model.CacheStats;
 import com.github.rudygunawan.kachi.policy.EvictionPolicy;
 import com.github.rudygunawan.kachi.policy.FrequencySketch;
+import com.github.rudygunawan.kachi.policy.PutCause;
 import com.github.rudygunawan.kachi.policy.RemovalCause;
 
 import java.util.*;
@@ -77,6 +79,7 @@ public class PrecisionCacheImpl<K, V> implements LoadingCache<K, V>, CacheMetric
     private final boolean recordStats;
     private final EvictionPolicy evictionPolicy;
     private final RemovalListener<? super K, ? super V> removalListener;
+    private final PutListener<? super K, ? super V> putListener;
     private final Expiry<? super K, ? super V> expiry;
     private final RefreshPolicy<? super K, ? super V> refreshPolicy;
     private final long refreshAfterWriteNanos;
@@ -142,6 +145,7 @@ public class PrecisionCacheImpl<K, V> implements LoadingCache<K, V>, CacheMetric
         this.recordStats = builder.isRecordingStats();
         this.evictionPolicy = builder.getEvictionPolicy();
         this.removalListener = (RemovalListener<? super K, ? super V>) builder.getRemovalListener();
+        this.putListener = (PutListener<? super K, ? super V>) builder.getPutListener();
         this.expiry = (Expiry<? super K, ? super V>) builder.getExpiry();
         this.refreshPolicy = (RefreshPolicy<? super K, ? super V>) builder.getRefreshPolicy();
         this.refreshAfterWriteNanos = builder.getRefreshAfterWriteNanos();
@@ -549,6 +553,11 @@ public class PrecisionCacheImpl<K, V> implements LoadingCache<K, V>, CacheMetric
         CacheEntry<V> newEntry = new CacheEntry<>(value, ttl, weight);
 
         oldEntry = storage.put(key, newEntry);
+
+        // Fire put event (before removal event to allow listeners to know about the new value first)
+        PutCause putCause = (oldEntry != null) ? PutCause.UPDATE : PutCause.INSERT;
+        firePutEvent(key, value, putCause);
+
         if (oldEntry != null) {
             // Subtract old entry weight and add new entry weight
             currentWeight.addAndGet(weight - oldEntry.getWeight());
@@ -1018,6 +1027,26 @@ public class PrecisionCacheImpl<K, V> implements LoadingCache<K, V>, CacheMetric
             } catch (Exception e) {
                 // Log and swallow exceptions from listener
                 LOGGER.log(Level.WARNING, "RemovalListener threw exception for key: " + key +
+                          ", cause: " + cause, e);
+            }
+        }
+    }
+
+    /**
+     * Fires a put event to the configured put listener.
+     * Exceptions thrown by the listener are logged and swallowed to prevent cache operation failures.
+     *
+     * @param key the key that was put
+     * @param value the value that was put
+     * @param cause the reason for the put (INSERT for new entries, UPDATE for replacements)
+     */
+    private void firePutEvent(K key, V value, PutCause cause) {
+        if (putListener != null) {
+            try {
+                putListener.onPut(key, value, cause);
+            } catch (Exception e) {
+                // Log and swallow exceptions from listener
+                LOGGER.log(Level.WARNING, "PutListener threw exception for key: " + key +
                           ", cause: " + cause, e);
             }
         }

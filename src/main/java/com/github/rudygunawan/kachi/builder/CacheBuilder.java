@@ -10,6 +10,7 @@ import com.github.rudygunawan.kachi.api.Weigher;
 import com.github.rudygunawan.kachi.impl.ConcurrentCacheImpl;
 import com.github.rudygunawan.kachi.impl.HighPerformanceCacheImpl;
 import com.github.rudygunawan.kachi.impl.PrecisionCacheImpl;
+import com.github.rudygunawan.kachi.listener.PutListener;
 import com.github.rudygunawan.kachi.listener.RemovalListener;
 import com.github.rudygunawan.kachi.policy.EvictionPolicy;
 
@@ -62,6 +63,7 @@ public class CacheBuilder<K, V> {
     private boolean recordStats = false;
     private EvictionPolicy evictionPolicy = EvictionPolicy.LRU;
     private RemovalListener<? super K, ? super V> removalListener;
+    private PutListener<? super K, ? super V> putListener;
     private Expiry<? super K, ? super V> expiry;
     private RefreshPolicy<? super K, ? super V> refreshPolicy;
     private long refreshAfterWriteNanos = UNSET_INT;
@@ -369,6 +371,62 @@ public class CacheBuilder<K, V> {
     }
 
     /**
+     * Specifies a listener instance that caches should notify each time an entry is put into the
+     * cache. The listener is invoked synchronously during the put operation and can distinguish
+     * between new insertions (INSERT) and updates to existing entries (UPDATE).
+     *
+     * <p>This is particularly useful for async database upsert operations, cache write-through
+     * patterns, audit logging, and event streaming.
+     *
+     * <p><b>Performance Considerations:</b>
+     * <ul>
+     *   <li>The listener is invoked synchronously, so it affects put() latency</li>
+     *   <li>For long-running operations like database writes, use async processing:
+     *       <pre>{@code
+     *       .putListener((key, value, cause) -> {
+     *           if (cause.isNewEntry()) {
+     *               executor.submit(() -> database.insert(key, value));
+     *           }
+     *       })
+     *       }</pre>
+     *   </li>
+     * </ul>
+     *
+     * <p><b>Warning:</b> all exceptions thrown by {@code listener} will be logged and then swallowed
+     * to prevent the put operation from failing.
+     *
+     * <p><b>Example - Async Database Upsert:</b>
+     * <pre>{@code
+     * Cache<String, User> cache = CacheBuilder.newBuilder()
+     *     .maximumSize(1000)
+     *     .putListener((key, user, cause) -> {
+     *         asyncExecutor.submit(() -> {
+     *             if (cause == PutCause.INSERT) {
+     *                 userRepository.insert(key, user);
+     *             } else {
+     *                 userRepository.update(key, user);
+     *             }
+     *         });
+     *     })
+     *     .build();
+     * }</pre>
+     *
+     * @param listener the put listener to use
+     * @return this builder instance
+     * @see PutListener
+     */
+    public <K1 extends K, V1 extends V> CacheBuilder<K1, V1> putListener(
+            PutListener<? super K1, ? super V1> listener) {
+        if (listener == null) {
+            throw new NullPointerException("put listener cannot be null");
+        }
+        @SuppressWarnings("unchecked")
+        CacheBuilder<K1, V1> me = (CacheBuilder<K1, V1>) this;
+        me.putListener = listener;
+        return me;
+    }
+
+    /**
      * Specifies a custom expiration policy that determines how long each entry should be retained
      * in the cache. This allows different entries to have different expiration times based on their
      * key, value, or other application-specific logic.
@@ -558,6 +616,10 @@ public class CacheBuilder<K, V> {
 
     public RemovalListener<? super K, ? super V> getRemovalListener() {
         return removalListener;
+    }
+
+    public PutListener<? super K, ? super V> getPutListener() {
+        return putListener;
     }
 
     public Expiry<? super K, ? super V> getExpiry() {
