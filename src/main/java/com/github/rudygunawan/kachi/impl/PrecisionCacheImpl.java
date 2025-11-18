@@ -1574,6 +1574,78 @@ public class PrecisionCacheImpl<K, V> implements LoadingCache<K, V>, CacheMetric
                     public EvictionPolicy getEvictionPolicy() {
                         return evictionPolicy;
                     }
+
+                    @Override
+                    public Map<K, V> hottest(int limit) {
+                        if (limit < 0) {
+                            throw new IllegalArgumentException("limit must not be negative");
+                        }
+                        if (limit == 0 || storage.isEmpty()) {
+                            return Collections.emptyMap();
+                        }
+
+                        // For PRECISION strategy with accurate eviction tracking
+                        List<Map.Entry<K, CacheEntry<V>>> entries = new ArrayList<>(storage.entrySet());
+
+                        // Sort based on eviction policy
+                        entries.sort((e1, e2) -> {
+                            CacheEntry<V> entry1 = e1.getValue();
+                            CacheEntry<V> entry2 = e2.getValue();
+
+                            return switch (evictionPolicy) {
+                                case LRU -> Long.compare(entry2.getAccessTime(), entry1.getAccessTime()); // Most recently accessed first
+                                case LFU -> Long.compare(entry2.getAccessCount(), entry1.getAccessCount()); // Most frequently accessed first
+                                case FIFO, WINDOW_TINY_LFU -> Long.compare(entry2.getWriteTime(), entry1.getWriteTime()); // Newest first
+                            };
+                        });
+
+                        Map<K, V> result = new LinkedHashMap<>();
+                        int count = Math.min(limit, entries.size());
+                        for (int i = 0; i < count; i++) {
+                            Map.Entry<K, CacheEntry<V>> entry = entries.get(i);
+                            V value = entry.getValue().getValue();
+                            if (value != null) {
+                                result.put(entry.getKey(), value);
+                            }
+                        }
+                        return Collections.unmodifiableMap(result);
+                    }
+
+                    @Override
+                    public Map<K, V> coldest(int limit) {
+                        if (limit < 0) {
+                            throw new IllegalArgumentException("limit must not be negative");
+                        }
+                        if (limit == 0 || storage.isEmpty()) {
+                            return Collections.emptyMap();
+                        }
+
+                        // For PRECISION strategy with accurate eviction tracking
+                        List<Map.Entry<K, CacheEntry<V>>> entries = new ArrayList<>(storage.entrySet());
+
+                        // Sort based on eviction policy (opposite of hottest)
+                        entries.sort((e1, e2) -> {
+                            CacheEntry<V> entry1 = e1.getValue();
+                            CacheEntry<V> entry2 = e2.getValue();
+
+                            return switch (evictionPolicy) {
+                                case LRU -> Long.compare(entry1.getAccessTime(), entry2.getAccessTime()); // Least recently accessed first
+                                case LFU -> Long.compare(entry1.getAccessCount(), entry2.getAccessCount()); // Least frequently accessed first
+                                case FIFO, WINDOW_TINY_LFU -> Long.compare(entry1.getWriteTime(), entry2.getWriteTime()); // Oldest first
+                            };
+                        });
+
+                        Map<K, V> result = new LinkedHashMap<>();
+                        int count = Math.min(limit, entries.size());
+                        for (int i = 0; i < count; i++) {
+                            Map.Entry<K, CacheEntry<V>> entry = entries.get(i);
+                            V value = entry.getValue().getValue();
+                            if (value != null) {
+                                result.put(entry.getKey(), value);
+                            }
+                        }
+                        return Collections.unmodifiableMap(result);
+                    }
                 });
             }
 
@@ -1620,6 +1692,58 @@ public class PrecisionCacheImpl<K, V> implements LoadingCache<K, V>, CacheMetric
                         }
                         long now = System.nanoTime();
                         return now - entry.getWriteTime();
+                    }
+
+                    @Override
+                    public Map<K, V> youngest(int limit) {
+                        if (limit < 0) {
+                            throw new IllegalArgumentException("limit must not be negative");
+                        }
+                        if (limit == 0 || storage.isEmpty()) {
+                            return Collections.emptyMap();
+                        }
+
+                        List<Map.Entry<K, CacheEntry<V>>> entries = new ArrayList<>(storage.entrySet());
+
+                        // Sort by write time descending (newest first)
+                        entries.sort((e1, e2) -> Long.compare(e2.getValue().getWriteTime(), e1.getValue().getWriteTime()));
+
+                        Map<K, V> result = new LinkedHashMap<>();
+                        int count = Math.min(limit, entries.size());
+                        for (int i = 0; i < count; i++) {
+                            Map.Entry<K, CacheEntry<V>> entry = entries.get(i);
+                            V value = entry.getValue().getValue();
+                            if (value != null) {
+                                result.put(entry.getKey(), value);
+                            }
+                        }
+                        return Collections.unmodifiableMap(result);
+                    }
+
+                    @Override
+                    public Map<K, V> oldest(int limit) {
+                        if (limit < 0) {
+                            throw new IllegalArgumentException("limit must not be negative");
+                        }
+                        if (limit == 0 || storage.isEmpty()) {
+                            return Collections.emptyMap();
+                        }
+
+                        List<Map.Entry<K, CacheEntry<V>>> entries = new ArrayList<>(storage.entrySet());
+
+                        // Sort by write time ascending (oldest first)
+                        entries.sort(Comparator.comparingLong(e -> e.getValue().getWriteTime()));
+
+                        Map<K, V> result = new LinkedHashMap<>();
+                        int count = Math.min(limit, entries.size());
+                        for (int i = 0; i < count; i++) {
+                            Map.Entry<K, CacheEntry<V>> entry = entries.get(i);
+                            V value = entry.getValue().getValue();
+                            if (value != null) {
+                                result.put(entry.getKey(), value);
+                            }
+                        }
+                        return Collections.unmodifiableMap(result);
                     }
                 });
             }

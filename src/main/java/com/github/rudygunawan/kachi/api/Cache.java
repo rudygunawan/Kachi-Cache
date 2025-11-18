@@ -101,6 +101,24 @@ public interface Cache<K, V> {
     long size();
 
     /**
+     * Returns the approximate number of entries in this cache.
+     *
+     * <p>This method is semantically equivalent to {@link #size()} and is provided for
+     * compatibility with Caffeine's API. The name "estimated" reflects that for some cache
+     * implementations, the size may be approximate rather than exact, especially in
+     * highly concurrent scenarios or when entries are in the process of being evicted.
+     *
+     * <p><b>Note:</b> Expired entries may be included in the count, but will never be visible
+     * to read or write operations. Entries with garbage-collected keys or values (when using
+     * weak/soft references) may also be counted until the next cleanup operation.
+     *
+     * @return the estimated number of mappings in this cache
+     */
+    default long estimatedSize() {
+        return size();
+    }
+
+    /**
      * Returns a current snapshot of this cache's cumulative statistics. All statistics are
      * initialized to zero, and are monotonically increasing over the lifetime of the cache.
      *

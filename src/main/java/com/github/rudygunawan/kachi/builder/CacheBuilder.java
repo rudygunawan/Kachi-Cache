@@ -21,6 +21,7 @@ import com.github.rudygunawan.kachi.listener.PutListener;
 import com.github.rudygunawan.kachi.listener.RemovalListener;
 import com.github.rudygunawan.kachi.policy.EvictionPolicy;
 import com.github.rudygunawan.kachi.policy.Strength;
+import com.github.rudygunawan.kachi.time.Ticker;
 
 import java.util.concurrent.Executor;
 import java.util.concurrent.ScheduledExecutorService;
@@ -84,6 +85,7 @@ public class CacheBuilder<K, V> {
     private ScheduledExecutorService scheduler;
     private Strength keyStrength = Strength.STRONG;
     private Strength valueStrength = Strength.STRONG;
+    private Ticker ticker;
 
     private CacheBuilder() {
     }
@@ -574,6 +576,55 @@ public class CacheBuilder<K, V> {
     }
 
     /**
+     * Specifies a custom time source for the cache.
+     *
+     * <p>By default, caches use {@link Ticker#systemTicker()} which reads the system's
+     * nanosecond-precision clock ({@link System#nanoTime()}). This method allows you to
+     * provide a custom ticker, which is primarily useful for testing time-based features
+     * (expiration, refresh) without waiting for wall-clock time.
+     *
+     * <p><b>Production Usage:</b>
+     * <pre>{@code
+     * // Default system ticker (no need to specify)
+     * Cache<String, User> cache = CacheBuilder.newBuilder()
+     *     .expireAfterWrite(10, TimeUnit.MINUTES)
+     *     .build();
+     * }</pre>
+     *
+     * <p><b>Testing Usage:</b>
+     * <pre>{@code
+     * // Use FakeTicker for testing
+     * FakeTicker ticker = new FakeTicker();
+     *
+     * Cache<String, User> cache = CacheBuilder.newBuilder()
+     *     .ticker(ticker)
+     *     .expireAfterWrite(10, TimeUnit.MINUTES)
+     *     .build();
+     *
+     * cache.put("user1", user);
+     * assertNotNull(cache.getIfPresent("user1"));
+     *
+     * // Advance time by 11 minutes
+     * ticker.advance(11, TimeUnit.MINUTES);
+     * cache.cleanUp();
+     *
+     * // Entry should be expired
+     * assertNull(cache.getIfPresent("user1"));
+     * }</pre>
+     *
+     * @param ticker the ticker to use for measuring time
+     * @return this builder instance
+     * @throws NullPointerException if ticker is null
+     */
+    public CacheBuilder<K, V> ticker(Ticker ticker) {
+        if (ticker == null) {
+            throw new NullPointerException("ticker cannot be null");
+        }
+        this.ticker = ticker;
+        return this;
+    }
+
+    /**
      * Specifies that keys should be wrapped in weak references.
      *
      * <p>Keys will be eligible for garbage collection when no strong references exist to them,
@@ -986,5 +1037,9 @@ public class CacheBuilder<K, V> {
 
     public Strength getValueStrength() {
         return valueStrength;
+    }
+
+    public Ticker getTicker() {
+        return ticker != null ? ticker : Ticker.systemTicker();
     }
 }

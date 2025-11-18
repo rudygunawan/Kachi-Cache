@@ -1438,6 +1438,61 @@ public class HighPerformanceCacheImpl<K, V> implements LoadingCache<K, V>, Cache
                     public EvictionPolicy getEvictionPolicy() {
                         return evictionPolicy;
                     }
+
+                    @Override
+                    public Map<K, V> hottest(int limit) {
+                        if (limit < 0) {
+                            throw new IllegalArgumentException("limit must not be negative");
+                        }
+                        if (limit == 0 || storage.isEmpty()) {
+                            return Collections.emptyMap();
+                        }
+
+                        // For HIGH_PERFORMANCE strategy, we use write time as approximation
+                        // since random eviction doesn't track access patterns
+                        List<Map.Entry<K, FastCacheEntry<V>>> entries = new ArrayList<>(storage.entrySet());
+
+                        // Sort by write time descending (newest first = hottest approximation)
+                        entries.sort((e1, e2) -> Long.compare(e2.getValue().getWriteTime(), e1.getValue().getWriteTime()));
+
+                        Map<K, V> result = new LinkedHashMap<>();
+                        int count = Math.min(limit, entries.size());
+                        for (int i = 0; i < count; i++) {
+                            Map.Entry<K, FastCacheEntry<V>> entry = entries.get(i);
+                            V value = entry.getValue().getValue();
+                            if (value != null) {
+                                result.put(entry.getKey(), value);
+                            }
+                        }
+                        return Collections.unmodifiableMap(result);
+                    }
+
+                    @Override
+                    public Map<K, V> coldest(int limit) {
+                        if (limit < 0) {
+                            throw new IllegalArgumentException("limit must not be negative");
+                        }
+                        if (limit == 0 || storage.isEmpty()) {
+                            return Collections.emptyMap();
+                        }
+
+                        // For HIGH_PERFORMANCE strategy, use write time as approximation
+                        List<Map.Entry<K, FastCacheEntry<V>>> entries = new ArrayList<>(storage.entrySet());
+
+                        // Sort by write time ascending (oldest first = coldest approximation)
+                        entries.sort(Comparator.comparingLong(e -> e.getValue().getWriteTime()));
+
+                        Map<K, V> result = new LinkedHashMap<>();
+                        int count = Math.min(limit, entries.size());
+                        for (int i = 0; i < count; i++) {
+                            Map.Entry<K, FastCacheEntry<V>> entry = entries.get(i);
+                            V value = entry.getValue().getValue();
+                            if (value != null) {
+                                result.put(entry.getKey(), value);
+                            }
+                        }
+                        return Collections.unmodifiableMap(result);
+                    }
                 });
             }
 
@@ -1484,6 +1539,58 @@ public class HighPerformanceCacheImpl<K, V> implements LoadingCache<K, V>, Cache
                         }
                         long now = System.nanoTime();
                         return now - entry.getWriteTime();
+                    }
+
+                    @Override
+                    public Map<K, V> youngest(int limit) {
+                        if (limit < 0) {
+                            throw new IllegalArgumentException("limit must not be negative");
+                        }
+                        if (limit == 0 || storage.isEmpty()) {
+                            return Collections.emptyMap();
+                        }
+
+                        List<Map.Entry<K, FastCacheEntry<V>>> entries = new ArrayList<>(storage.entrySet());
+
+                        // Sort by write time descending (newest first)
+                        entries.sort((e1, e2) -> Long.compare(e2.getValue().getWriteTime(), e1.getValue().getWriteTime()));
+
+                        Map<K, V> result = new LinkedHashMap<>();
+                        int count = Math.min(limit, entries.size());
+                        for (int i = 0; i < count; i++) {
+                            Map.Entry<K, FastCacheEntry<V>> entry = entries.get(i);
+                            V value = entry.getValue().getValue();
+                            if (value != null) {
+                                result.put(entry.getKey(), value);
+                            }
+                        }
+                        return Collections.unmodifiableMap(result);
+                    }
+
+                    @Override
+                    public Map<K, V> oldest(int limit) {
+                        if (limit < 0) {
+                            throw new IllegalArgumentException("limit must not be negative");
+                        }
+                        if (limit == 0 || storage.isEmpty()) {
+                            return Collections.emptyMap();
+                        }
+
+                        List<Map.Entry<K, FastCacheEntry<V>>> entries = new ArrayList<>(storage.entrySet());
+
+                        // Sort by write time ascending (oldest first)
+                        entries.sort(Comparator.comparingLong(e -> e.getValue().getWriteTime()));
+
+                        Map<K, V> result = new LinkedHashMap<>();
+                        int count = Math.min(limit, entries.size());
+                        for (int i = 0; i < count; i++) {
+                            Map.Entry<K, FastCacheEntry<V>> entry = entries.get(i);
+                            V value = entry.getValue().getValue();
+                            if (value != null) {
+                                result.put(entry.getKey(), value);
+                            }
+                        }
+                        return Collections.unmodifiableMap(result);
                     }
                 });
             }

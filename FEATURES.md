@@ -231,10 +231,116 @@ policy.expiration().ifPresent(expiration -> {
 ```
 
 **Capabilities:**
-- **Eviction:** getMaximum(), setMaximum(), weightedSize(), isWeighted(), getEvictionPolicy()
-- **Expiration:** getExpiresAfterWrite(), setExpiresAfterWrite(), getExpiresAfterAccess(), setExpiresAfterAccess(), ageOf(key)
+- **Eviction:** getMaximum(), setMaximum(), weightedSize(), isWeighted(), getEvictionPolicy(), hottest(), coldest()
+- **Expiration:** getExpiresAfterWrite(), setExpiresAfterWrite(), getExpiresAfterAccess(), setExpiresAfterAccess(), ageOf(key), youngest(), oldest()
 - Dynamic runtime modification
 - Optional-based API (returns empty if feature not configured)
+- Snapshot queries for debugging and monitoring
+
+#### 8. Ticker Interface 🆕
+Custom time source for testing time-based features without wall-clock delays.
+
+```java
+// Production: Use system time (default)
+Cache<String, User> cache = CacheBuilder.newBuilder()
+    .expireAfterWrite(10, TimeUnit.MINUTES)
+    .build();
+
+// Testing: Use FakeTicker for controlled time
+FakeTicker ticker = new FakeTicker();
+
+Cache<String, User> testCache = CacheBuilder.newBuilder()
+    .ticker(ticker)
+    .expireAfterWrite(10, TimeUnit.MINUTES)
+    .build();
+
+testCache.put("user1", user);
+assertNotNull(testCache.getIfPresent("user1"));
+
+// Advance time by 11 minutes
+ticker.advance(11, TimeUnit.MINUTES);
+testCache.cleanUp();
+
+// Entry should be expired
+assertNull(testCache.getIfPresent("user1"));
+```
+
+**Features:**
+- `Ticker.systemTicker()` - Production time source using System.nanoTime()
+- `FakeTicker` - Test implementation with manual time control
+- `ticker.advance(duration, unit)` - Advance time in tests
+- Enables testing expiration and refresh without waiting
+- Compatible with Caffeine's Ticker interface
+
+#### 9. Policy Snapshot Queries 🆕
+Query methods to inspect cache state for debugging and monitoring.
+
+```java
+Cache<String, User> cache = CacheBuilder.newBuilder()
+    .maximumSize(1000)
+    .expireAfterWrite(10, TimeUnit.MINUTES)
+    .build();
+
+// Query hottest entries (most likely to be retained)
+cache.policy().eviction().ifPresent(eviction -> {
+    Map<K, V> hot = eviction.hottest(10);
+    System.out.println("Top 10 hottest entries: " + hot.keySet());
+});
+
+// Query coldest entries (most likely to be evicted)
+cache.policy().eviction().ifPresent(eviction -> {
+    Map<K, V> cold = eviction.coldest(10);
+    System.out.println("Top 10 eviction candidates: " + cold.keySet());
+});
+
+// Query youngest entries (newest by expiration policy)
+cache.policy().expiration().ifPresent(expiration -> {
+    Map<K, V> youngest = expiration.youngest(10);
+    System.out.println("Top 10 youngest entries: " + youngest.keySet());
+});
+
+// Query oldest entries (closest to expiration)
+cache.policy().expiration().ifPresent(expiration -> {
+    Map<K, V> oldest = expiration.oldest(10);
+    System.out.println("Top 10 entries about to expire: " + oldest.keySet());
+});
+```
+
+**Capabilities:**
+- **Eviction Snapshots:**
+  - `hottest(limit)` - Entries most likely to be retained
+  - `coldest(limit)` - Entries most likely to be evicted
+  - For PRECISION strategy: Accurate based on LRU/LFU/FIFO policy
+  - For HIGH_PERFORMANCE strategy: Best-effort approximation using write time
+
+- **Expiration Snapshots:**
+  - `youngest(limit)` - Newest entries by expiration policy
+  - `oldest(limit)` - Oldest entries, soonest to expire
+  - Sorted by write time (expireAfterWrite) or access time (expireAfterAccess)
+
+- Returns unmodifiable LinkedHashMap preserving order
+- Useful for cache analysis, debugging, and monitoring
+
+#### 10. estimatedSize() Method 🆕
+Caffeine-compatible API for querying cache size.
+
+```java
+Cache<String, User> cache = CacheBuilder.newBuilder()
+    .maximumSize(1000)
+    .build();
+
+// Both methods return the same value
+long size1 = cache.size();
+long size2 = cache.estimatedSize();
+
+assert size1 == size2;
+```
+
+**Features:**
+- Semantically equivalent to `size()`
+- Provided for Caffeine API compatibility
+- Name reflects that size may be approximate in concurrent scenarios
+- Default interface method - no changes needed in implementations
 
 ---
 
@@ -448,6 +554,9 @@ Cache<String, User> cache = CacheBuilder.newBuilder()
 | Weak/Soft references | ❌ | ✅* | ✅ | ✅ |
 | EvictionListener | ❌ | ✅ | ❌ | ❌ |
 | Policy introspection | ❌ | ✅ | ✅ | ❌ |
+| Ticker (testing) | ❌ | ✅ | ✅ | ❌ |
+| Policy snapshot queries | ❌ | ✅ | ✅ | ❌ |
+| estimatedSize() method | ❌ | ✅ | ✅ | ❌ |
 | **Kachi Unique** |
 | PutListener (INSERT/UPDATE) | ✅ | ✅ | ❌ | ❌ |
 | Dual-strategy architecture | ✅ | ✅ | ❌ | ❌ |

@@ -1,5 +1,6 @@
 package com.github.rudygunawan.kachi.policy;
 
+import java.util.Map;
 import java.util.Optional;
 
 /**
@@ -108,6 +109,62 @@ public interface Policy<K, V> {
          * @return the eviction policy (LRU, LFU, FIFO, WINDOW_TINY_LFU)
          */
         EvictionPolicy getEvictionPolicy();
+
+        /**
+         * Returns an unmodifiable snapshot map of the entries in this cache that are most
+         * likely to be retained (hottest entries). The returned map is ordered from most
+         * likely to be retained to least likely, up to the specified limit.
+         *
+         * <p>This method is useful for debugging and monitoring which entries are being
+         * accessed most frequently or recently, depending on the eviction policy.
+         *
+         * <p><b>Note:</b> The accuracy of this snapshot depends on the cache strategy:
+         * <ul>
+         *   <li><b>PRECISION</b>: Accurate snapshot based on actual eviction policy</li>
+         *   <li><b>HIGH_PERFORMANCE</b>: Best-effort approximation (may use write time)</li>
+         * </ul>
+         *
+         * <p><b>Example usage:</b>
+         * <pre>{@code
+         * cache.policy().eviction().ifPresent(eviction -> {
+         *     Map<K, V> hot = eviction.hottest(10);
+         *     System.out.println("Top 10 hottest entries: " + hot.keySet());
+         * });
+         * }</pre>
+         *
+         * @param limit the maximum number of entries to return
+         * @return an unmodifiable map of the hottest entries, ordered by retention likelihood
+         * @throws IllegalArgumentException if limit is negative
+         */
+        Map<K, V> hottest(int limit);
+
+        /**
+         * Returns an unmodifiable snapshot map of the entries in this cache that are most
+         * likely to be evicted (coldest entries). The returned map is ordered from most
+         * likely to be evicted to least likely, up to the specified limit.
+         *
+         * <p>This method is useful for debugging and monitoring which entries are candidates
+         * for eviction, allowing you to understand eviction behavior.
+         *
+         * <p><b>Note:</b> The accuracy of this snapshot depends on the cache strategy:
+         * <ul>
+         *   <li><b>PRECISION</b>: Accurate snapshot based on actual eviction policy</li>
+         *   <li><b>HIGH_PERFORMANCE</b>: Best-effort approximation (may use write time)</li>
+         * </ul>
+         *
+         * <p><b>Example usage:</b>
+         * <pre>{@code
+         * cache.policy().eviction().ifPresent(eviction -> {
+         *     Map<K, V> cold = eviction.coldest(10);
+         *     System.out.println("Top 10 eviction candidates: " + cold.keySet());
+         * });
+         * }</pre>
+         *
+         * @param limit the maximum number of entries to return
+         * @return an unmodifiable map of the coldest entries, ordered by eviction likelihood
+         * @throws IllegalArgumentException if limit is negative
+         */
+        Map<K, V> coldest(int limit);
     }
 
     /**
@@ -159,5 +216,60 @@ public interface Policy<K, V> {
          * @return the age in nanoseconds, or -1 if not found or not applicable
          */
         long ageOf(K key);
+
+        /**
+         * Returns an unmodifiable snapshot map of the entries in this cache that have the
+         * youngest expiration times (newest entries). The returned map is ordered from youngest
+         * to oldest, up to the specified limit.
+         *
+         * <p>This method returns entries based on the configured expiration policy:
+         * <ul>
+         *   <li><b>expireAfterWrite</b>: Entries ordered by creation/write time (newest first)</li>
+         *   <li><b>expireAfterAccess</b>: Entries ordered by last access time (most recently accessed first)</li>
+         *   <li><b>expireAfter (variable)</b>: Entries ordered by remaining time until expiration</li>
+         * </ul>
+         *
+         * <p><b>Example usage:</b>
+         * <pre>{@code
+         * cache.policy().expiration().ifPresent(expiration -> {
+         *     Map<K, V> youngest = expiration.youngest(10);
+         *     System.out.println("Top 10 youngest entries: " + youngest.keySet());
+         * });
+         * }</pre>
+         *
+         * @param limit the maximum number of entries to return
+         * @return an unmodifiable map of the youngest entries, ordered by age
+         * @throws IllegalArgumentException if limit is negative
+         */
+        Map<K, V> youngest(int limit);
+
+        /**
+         * Returns an unmodifiable snapshot map of the entries in this cache that have the
+         * oldest expiration times (oldest entries). The returned map is ordered from oldest
+         * to youngest, up to the specified limit.
+         *
+         * <p>This method returns entries based on the configured expiration policy:
+         * <ul>
+         *   <li><b>expireAfterWrite</b>: Entries ordered by creation/write time (oldest first)</li>
+         *   <li><b>expireAfterAccess</b>: Entries ordered by last access time (least recently accessed first)</li>
+         *   <li><b>expireAfter (variable)</b>: Entries closest to expiration (soonest to expire first)</li>
+         * </ul>
+         *
+         * <p>This is particularly useful for debugging expiration behavior and understanding
+         * which entries are about to expire.
+         *
+         * <p><b>Example usage:</b>
+         * <pre>{@code
+         * cache.policy().expiration().ifPresent(expiration -> {
+         *     Map<K, V> oldest = expiration.oldest(10);
+         *     System.out.println("Top 10 entries closest to expiration: " + oldest.keySet());
+         * });
+         * }</pre>
+         *
+         * @param limit the maximum number of entries to return
+         * @return an unmodifiable map of the oldest entries, ordered by age
+         * @throws IllegalArgumentException if limit is negative
+         */
+        Map<K, V> oldest(int limit);
     }
 }
