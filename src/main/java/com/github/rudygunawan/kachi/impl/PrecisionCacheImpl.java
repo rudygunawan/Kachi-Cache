@@ -1306,4 +1306,78 @@ public class PrecisionCacheImpl<K, V> implements LoadingCache<K, V>, CacheMetric
                 neverExpires
         );
     }
+
+    @Override
+    public V compute(K key, java.util.function.BiFunction<? super K, ? super V, ? extends V> remappingFunction) {
+        java.util.Objects.requireNonNull(key, "key cannot be null");
+        java.util.Objects.requireNonNull(remappingFunction, "remappingFunction cannot be null");
+
+        V oldValue = storage.get(key) != null ? storage.get(key).getValue() : null;
+        V newValue = remappingFunction.apply(key, oldValue);
+
+        if (newValue == null) {
+            if (oldValue != null) {
+                invalidate(key);
+            }
+            return null;
+        } else {
+            put(key, newValue);
+            return newValue;
+        }
+    }
+
+    @Override
+    public V computeIfAbsent(K key, java.util.function.Function<? super K, ? extends V> mappingFunction) {
+        java.util.Objects.requireNonNull(key, "key cannot be null");
+        java.util.Objects.requireNonNull(mappingFunction, "mappingFunction cannot be null");
+
+        V existing = getIfPresent(key);
+        if (existing != null) {
+            return existing;
+        }
+
+        V newValue = mappingFunction.apply(key);
+        if (newValue != null) {
+            put(key, newValue);
+        }
+        return newValue;
+    }
+
+    @Override
+    public V computeIfPresent(K key, java.util.function.BiFunction<? super K, ? super V, ? extends V> remappingFunction) {
+        java.util.Objects.requireNonNull(key, "key cannot be null");
+        java.util.Objects.requireNonNull(remappingFunction, "remappingFunction cannot be null");
+
+        V oldValue = getIfPresent(key);
+        if (oldValue == null) {
+            return null;
+        }
+
+        V newValue = remappingFunction.apply(key, oldValue);
+        if (newValue == null) {
+            invalidate(key);
+            return null;
+        } else {
+            put(key, newValue);
+            return newValue;
+        }
+    }
+
+    @Override
+    public V merge(K key, V value, java.util.function.BiFunction<? super V, ? super V, ? extends V> remappingFunction) {
+        java.util.Objects.requireNonNull(key, "key cannot be null");
+        java.util.Objects.requireNonNull(value, "value cannot be null");
+        java.util.Objects.requireNonNull(remappingFunction, "remappingFunction cannot be null");
+
+        V oldValue = getIfPresent(key);
+        V newValue = (oldValue == null) ? value : remappingFunction.apply(oldValue, value);
+
+        if (newValue == null) {
+            invalidate(key);
+            return null;
+        } else {
+            put(key, newValue);
+            return newValue;
+        }
+    }
 }

@@ -1,5 +1,8 @@
 package com.github.rudygunawan.kachi.builder;
 
+import com.github.rudygunawan.kachi.api.AsyncCache;
+import com.github.rudygunawan.kachi.api.AsyncCacheLoader;
+import com.github.rudygunawan.kachi.api.AsyncLoadingCache;
 import com.github.rudygunawan.kachi.api.Cache;
 import com.github.rudygunawan.kachi.api.CacheLoader;
 import com.github.rudygunawan.kachi.api.CacheStrategy;
@@ -7,6 +10,8 @@ import com.github.rudygunawan.kachi.api.Expiry;
 import com.github.rudygunawan.kachi.api.LoadingCache;
 import com.github.rudygunawan.kachi.api.RefreshPolicy;
 import com.github.rudygunawan.kachi.api.Weigher;
+import com.github.rudygunawan.kachi.impl.AsyncCacheImpl;
+import com.github.rudygunawan.kachi.impl.AsyncLoadingCacheImpl;
 import com.github.rudygunawan.kachi.impl.ConcurrentCacheImpl;
 import com.github.rudygunawan.kachi.impl.HighPerformanceCacheImpl;
 import com.github.rudygunawan.kachi.impl.PrecisionCacheImpl;
@@ -575,6 +580,82 @@ public class CacheBuilder<K, V> {
             case HIGH_PERFORMANCE -> new HighPerformanceCacheImpl<K1, V1>(this, loader);
             case PRECISION -> new PrecisionCacheImpl<K1, V1>(this, loader);
         };
+    }
+
+    /**
+     * Builds an async cache which does not automatically load values when keys are requested.
+     * All operations return {@link java.util.concurrent.CompletableFuture} for non-blocking access.
+     *
+     * <p>The async cache wraps a synchronous cache implementation. The implementation used depends
+     * on the configured strategy:
+     * <ul>
+     *   <li>{@link CacheStrategy#HIGH_PERFORMANCE} (default) - Fast, lock-free reads</li>
+     *   <li>{@link CacheStrategy#PRECISION} - Accurate eviction, per-key locking</li>
+     * </ul>
+     *
+     * <p><b>Example usage:</b>
+     * <pre>{@code
+     * AsyncCache<String, User> cache = CacheBuilder.newBuilder()
+     *     .maximumSize(1000)
+     *     .expireAfterWrite(10, TimeUnit.MINUTES)
+     *     .buildAsync();
+     *
+     * // Non-blocking get with async computation
+     * CompletableFuture<User> future = cache.get("userId", key ->
+     *     CompletableFuture.supplyAsync(() -> database.fetchUser(key))
+     * );
+     * }</pre>
+     *
+     * @return an async cache having the requested features
+     */
+    public <K1 extends K, V1 extends V> AsyncCache<K1, V1> buildAsync() {
+        Cache<K1, V1> syncCache = build();
+        return new AsyncCacheImpl<>(syncCache);
+    }
+
+    /**
+     * Builds an async loading cache, which automatically loads values asynchronously using the
+     * supplied {@link AsyncCacheLoader}. All operations return {@link java.util.concurrent.CompletableFuture}
+     * for non-blocking access.
+     *
+     * <p>The async loading cache wraps a synchronous cache implementation. The implementation used
+     * depends on the configured strategy:
+     * <ul>
+     *   <li>{@link CacheStrategy#HIGH_PERFORMANCE} (default) - Fast, lock-free reads</li>
+     *   <li>{@link CacheStrategy#PRECISION} - Accurate eviction, per-key locking</li>
+     * </ul>
+     *
+     * <p><b>Example usage:</b>
+     * <pre>{@code
+     * AsyncLoadingCache<String, User> cache = CacheBuilder.newBuilder()
+     *     .maximumSize(1000)
+     *     .expireAfterWrite(10, TimeUnit.MINUTES)
+     *     .buildAsync((key, executor) ->
+     *         CompletableFuture.supplyAsync(() -> database.fetchUser(key), executor)
+     *     );
+     *
+     * // Non-blocking get with automatic loading
+     * CompletableFuture<User> future = cache.get("userId");
+     * }</pre>
+     *
+     * @param asyncLoader the async cache loader used to obtain new values
+     * @return an async loading cache having the requested features
+     */
+    public <K1 extends K, V1 extends V> AsyncLoadingCache<K1, V1> buildAsync(
+            AsyncCacheLoader<? super K1, V1> asyncLoader) {
+        if (asyncLoader == null) {
+            throw new NullPointerException("async loader cannot be null");
+        }
+
+        // Create a synchronous loader that wraps the async loader
+        java.util.concurrent.Executor executor = AsyncLoadingCacheImpl.createDefaultExecutor();
+        CacheLoader<K1, V1> syncLoader = AsyncLoadingCacheImpl.toSyncLoader(asyncLoader, executor);
+
+        // Build the synchronous loading cache
+        LoadingCache<K1, V1> syncCache = build(syncLoader);
+
+        // Wrap in async loading cache
+        return new AsyncLoadingCacheImpl<>(syncCache, asyncLoader, executor);
     }
 
     // Package-private getters for ConcurrentCacheImpl
