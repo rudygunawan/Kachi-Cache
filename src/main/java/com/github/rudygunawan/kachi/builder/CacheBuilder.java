@@ -15,10 +15,13 @@ import com.github.rudygunawan.kachi.impl.AsyncLoadingCacheImpl;
 import com.github.rudygunawan.kachi.impl.ConcurrentCacheImpl;
 import com.github.rudygunawan.kachi.impl.HighPerformanceCacheImpl;
 import com.github.rudygunawan.kachi.impl.PrecisionCacheImpl;
+import com.github.rudygunawan.kachi.listener.CacheWriter;
 import com.github.rudygunawan.kachi.listener.PutListener;
 import com.github.rudygunawan.kachi.listener.RemovalListener;
 import com.github.rudygunawan.kachi.policy.EvictionPolicy;
 
+import java.util.concurrent.Executor;
+import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 
 /**
@@ -69,10 +72,13 @@ public class CacheBuilder<K, V> {
     private EvictionPolicy evictionPolicy = EvictionPolicy.LRU;
     private RemovalListener<? super K, ? super V> removalListener;
     private PutListener<? super K, ? super V> putListener;
+    private CacheWriter<? super K, ? super V> cacheWriter;
     private Expiry<? super K, ? super V> expiry;
     private RefreshPolicy<? super K, ? super V> refreshPolicy;
     private long refreshAfterWriteNanos = UNSET_INT;
     private CacheStrategy strategy = CacheStrategy.HIGH_PERFORMANCE; // Default to fast
+    private Executor executor;
+    private ScheduledExecutorService scheduler;
 
     private CacheBuilder() {
     }
@@ -432,6 +438,137 @@ public class CacheBuilder<K, V> {
     }
 
     /**
+     * Specifies a writer instance for write-through or write-behind operations to external
+     * storage (e.g., databases, file systems).
+     *
+     * <p>The {@link CacheWriter} provides structured write() and delete() methods that are
+     * invoked synchronously during cache operations. This is more structured than
+     * {@link PutListener} and includes deletion events.
+     *
+     * <p><b>Write-Through Example:</b>
+     * <pre>{@code
+     * Cache<String, User> cache = CacheBuilder.newBuilder()
+     *     .maximumSize(1000)
+     *     .writer(CacheWriter.sync(
+     *         (key, user) -> database.upsert(key, user),
+     *         (key, user, cause) -> {
+     *           if (cause == RemovalCause.EXPLICIT) {
+     *             database.delete(key);
+     *           }
+     *         }
+     *     ))
+     *     .build();
+     * }</pre>
+     *
+     * <p><b>Async Write-Behind Example:</b>
+     * <pre>{@code
+     * ExecutorService writeExecutor = Executors.newFixedThreadPool(4);
+     *
+     * Cache<String, User> cache = CacheBuilder.newBuilder()
+     *     .maximumSize(1000)
+     *     .writer(CacheWriter.async(
+     *         writeExecutor,
+     *         (key, user) -> database.upsert(key, user),
+     *         (key, user, cause) -> database.delete(key)
+     *     ))
+     *     .build();
+     * }</pre>
+     *
+     * <p><b>Warning:</b> all exceptions thrown by {@code writer} will be logged and then swallowed.
+     *
+     * @param writer the cache writer to use
+     * @return this builder instance
+     * @see CacheWriter
+     * @see PutListener
+     */
+    public <K1 extends K, V1 extends V> CacheBuilder<K1, V1> writer(
+            CacheWriter<? super K1, ? super V1> writer) {
+        if (writer == null) {
+            throw new NullPointerException("cache writer cannot be null");
+        }
+        @SuppressWarnings("unchecked")
+        CacheBuilder<K1, V1> me = (CacheBuilder<K1, V1>) this;
+        me.cacheWriter = writer;
+        return me;
+    }
+
+    /**
+     * Specifies a custom executor for async cache operations and LoadingCache.
+     *
+     * <p>By default, Kachi uses virtual threads (JDK 21) for async operations. This method
+     * allows you to provide a custom executor for:
+     * <ul>
+     *   <li>AsyncCache and AsyncLoadingCache operations</li>
+     *   <li>LoadingCache background loading</li>
+     *   <li>Async refresh operations</li>
+     * </ul>
+     *
+     * <p><b>Example - Fixed Thread Pool:</b>
+     * <pre>{@code
+     * Executor customExecutor = Executors.newFixedThreadPool(10);
+     *
+     * AsyncCache<String, User> cache = CacheBuilder.newBuilder()
+     *     .maximumSize(1000)
+     *     .executor(customExecutor)
+     *     .buildAsync();
+     * }</pre>
+     *
+     * <p><b>Example - ForkJoinPool:</b>
+     * <pre>{@code
+     * AsyncCache<String, Data> cache = CacheBuilder.newBuilder()
+     *     .executor(ForkJoinPool.commonPool())
+     *     .buildAsync();
+     * }</pre>
+     *
+     * @param executor the executor to use for async operations
+     * @return this builder instance
+     */
+    public CacheBuilder<K, V> executor(Executor executor) {
+        if (executor == null) {
+            throw new NullPointerException("executor cannot be null");
+        }
+        this.executor = executor;
+        return this;
+    }
+
+    /**
+     * Specifies a custom scheduled executor for cleanup and refresh tasks.
+     *
+     * <p>By default, Kachi creates its own scheduled executor using virtual threads for:
+     * <ul>
+     *   <li>Periodic TTL cleanup (every 1 minute)</li>
+     *   <li>Background refresh scheduling</li>
+     * </ul>
+     *
+     * <p>This method allows you to provide a custom scheduler for these tasks.
+     *
+     * <p><b>Example:</b>
+     * <pre>{@code
+     * ScheduledExecutorService customScheduler =
+     *     Executors.newScheduledThreadPool(2);
+     *
+     * Cache<String, User> cache = CacheBuilder.newBuilder()
+     *     .maximumSize(1000)
+     *     .expireAfterWrite(10, TimeUnit.MINUTES)
+     *     .scheduler(customScheduler)
+     *     .build();
+     * }</pre>
+     *
+     * <p><b>Warning:</b> The scheduler must remain running for the lifetime of the cache.
+     * Shutting down the scheduler will stop cleanup and refresh operations.
+     *
+     * @param scheduler the scheduled executor to use for maintenance tasks
+     * @return this builder instance
+     */
+    public CacheBuilder<K, V> scheduler(ScheduledExecutorService scheduler) {
+        if (scheduler == null) {
+            throw new NullPointerException("scheduler cannot be null");
+        }
+        this.scheduler = scheduler;
+        return this;
+    }
+
+    /**
      * Specifies a custom expiration policy that determines how long each entry should be retained
      * in the cache. This allows different entries to have different expiration times based on their
      * key, value, or other application-specific logic.
@@ -703,6 +840,10 @@ public class CacheBuilder<K, V> {
         return putListener;
     }
 
+    public CacheWriter<? super K, ? super V> getCacheWriter() {
+        return cacheWriter;
+    }
+
     public Expiry<? super K, ? super V> getExpiry() {
         return expiry;
     }
@@ -717,5 +858,13 @@ public class CacheBuilder<K, V> {
 
     public CacheStrategy getStrategy() {
         return strategy;
+    }
+
+    public Executor getExecutor() {
+        return executor;
+    }
+
+    public ScheduledExecutorService getScheduler() {
+        return scheduler;
     }
 }
