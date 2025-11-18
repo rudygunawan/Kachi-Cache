@@ -1,6 +1,6 @@
-package com.github.rudygunawan.kachi.cache.listener;
+package com.github.rudygunawan.kachi.listener;
 
-import com.github.rudygunawan.kachi.cache.policy.PutCause;
+import com.github.rudygunawan.kachi.policy.PutCause;
 
 /**
  * A listener for cache put/insert operations.

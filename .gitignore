@@ -24,3 +24,6 @@ buildNumber.properties
 # OS
 .DS_Store
 Thumbs.db
+
+# Generated Javadoc
+javadoc/

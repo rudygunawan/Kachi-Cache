@@ -1,4 +1,4 @@
-package com.github.rudygunawan.kachi.cache.policy;
+package com.github.rudygunawan.kachi.policy;
 
 /**
  * The reason why a cache entry was put/inserted into the cache.
