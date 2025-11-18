@@ -19,6 +19,7 @@ import com.github.rudygunawan.kachi.policy.Policy;
 import com.github.rudygunawan.kachi.policy.PutCause;
 import com.github.rudygunawan.kachi.policy.RemovalCause;
 import com.github.rudygunawan.kachi.policy.Strength;
+import com.github.rudygunawan.kachi.reference.KeyReference;
 
 import java.util.*;
 import java.util.concurrent.*;
@@ -89,8 +90,12 @@ public class PrecisionCacheImpl<K, V> implements LoadingCache<K, V>, CacheMetric
     private final long refreshAfterWriteNanos;
 
     // Reference strength for GC-aware caching
+    private final Strength keyStrength;
     private final Strength valueStrength;
+    private final ReferenceQueue<K> keyReferenceQueue;
     private final ReferenceQueue<V> valueReferenceQueue;
+    // Track weak key references for GC notification
+    private final ConcurrentHashMap<K, KeyReference<K>> keyReferences;
 
     // Statistics
     private final AtomicLong hitCount = new AtomicLong(0);
@@ -160,8 +165,15 @@ public class PrecisionCacheImpl<K, V> implements LoadingCache<K, V>, CacheMetric
         this.refreshAfterWriteNanos = builder.getRefreshAfterWriteNanos();
 
         // Initialize reference strength for GC-aware caching
+        this.keyStrength = builder.getKeyStrength();
         this.valueStrength = builder.getValueStrength();
+        this.keyReferenceQueue = (keyStrength != Strength.STRONG) ? new ReferenceQueue<>() : null;
         this.valueReferenceQueue = (valueStrength != Strength.STRONG) ? new ReferenceQueue<>() : null;
+
+        // Initialize key reference tracking for weak keys
+        this.keyReferences = (keyStrength != Strength.STRONG)
+            ? new ConcurrentHashMap<>(builder.getInitialCapacity(), 0.75f, builder.getConcurrencyLevel())
+            : null;
 
         // Initialize Window TinyLFU segments if that policy is selected
         if (evictionPolicy == EvictionPolicy.WINDOW_TINY_LFU && maximumSize > 0) {
@@ -568,6 +580,13 @@ public class PrecisionCacheImpl<K, V> implements LoadingCache<K, V>, CacheMetric
 
         oldEntry = storage.put(key, newEntry);
 
+        // Track weak key reference if using weak keys
+        if (keyReferences != null && oldEntry == null) {
+            // Only create reference for new entries (not replacements)
+            KeyReference<K> keyRef = KeyReference.create(key, keyStrength, keyReferenceQueue);
+            keyReferences.put(key, keyRef);
+        }
+
         // Fire put event (before removal event to allow listeners to know about the new value first)
         PutCause putCause = (oldEntry != null) ? PutCause.UPDATE : PutCause.INSERT;
         firePutEvent(key, value, putCause);
@@ -626,6 +645,11 @@ public class PrecisionCacheImpl<K, V> implements LoadingCache<K, V>, CacheMetric
         try {
             CacheEntry<V> removed = storage.remove(key);
             if (removed != null) {
+                // Remove key reference if using weak keys
+                if (keyReferences != null) {
+                    keyReferences.remove(key);
+                }
+
                 // Subtract the removed entry's weight
                 currentWeight.addAndGet(-removed.getWeight());
                 removeFromEvictionQueues(key);
@@ -724,6 +748,11 @@ public class PrecisionCacheImpl<K, V> implements LoadingCache<K, V>, CacheMetric
         if (valueReferenceQueue != null) {
             cleanUpGarbageCollectedValues();
         }
+
+        // Poll reference queue for GC'd keys (non-blocking)
+        if (keyReferenceQueue != null) {
+            cleanUpGarbageCollectedKeys();
+        }
     }
 
     /**
@@ -737,6 +766,52 @@ public class PrecisionCacheImpl<K, V> implements LoadingCache<K, V>, CacheMetric
         while (valueReferenceQueue.poll() != null) {
             // Reference has been cleared by GC
             // The actual entry removal happens in the main cleanUp() scan above
+        }
+    }
+
+    /**
+     * Cleans up entries whose keys have been garbage collected.
+     * This method scans the key references map for cleared references and removes the corresponding entries.
+     */
+    private void cleanUpGarbageCollectedKeys() {
+        if (keyReferences == null) return;
+
+        // Poll the reference queue (non-blocking)
+        while (keyReferenceQueue.poll() != null) {
+            // A key was GC'd - we'll find it in the scan below
+        }
+
+        // Scan key references for cleared references
+        List<K> keysToRemove = new ArrayList<>();
+        for (Map.Entry<K, KeyReference<K>> entry : keyReferences.entrySet()) {
+            if (entry.getValue().isCleared()) {
+                keysToRemove.add(entry.getKey());
+            }
+        }
+
+        // Remove entries with GC'd keys
+        for (K key : keysToRemove) {
+            ReentrantReadWriteLock lock = getOrCreateLock(key);
+            lock.writeLock().lock();
+            try {
+                CacheEntry<V> removed = storage.remove(key);
+                keyReferences.remove(key);
+
+                if (removed != null) {
+                    currentWeight.addAndGet(-removed.getWeight());
+                    removeFromEvictionQueues(key);
+
+                    // Get value (may be null if also GC'd)
+                    V value = removed.getValue();
+
+                    // Key was GC'd - treat as explicit removal
+                    fireRemovalEvent(key, value, RemovalCause.EXPLICIT);
+
+                    if (recordStats) evictionCount.incrementAndGet();
+                }
+            } finally {
+                lock.writeLock().unlock();
+            }
         }
     }
 

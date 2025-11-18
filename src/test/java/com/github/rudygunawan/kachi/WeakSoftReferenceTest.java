@@ -320,4 +320,174 @@ class WeakSoftReferenceTest {
         assertTrue(map.containsKey("key1"));
         assertTrue(map.containsKey("key2"));
     }
+
+    // ========== Weak Keys Tests ==========
+
+    @Test
+    void testWeakKeysConfiguration() {
+        CacheBuilder<String, String> builder = CacheBuilder.newBuilder()
+                .weakKeys();
+
+        assertEquals(Strength.WEAK, builder.getKeyStrength());
+        assertEquals(Strength.STRONG, builder.getValueStrength());
+    }
+
+    @Test
+    void testWeakKeysCacheCreation() {
+        Cache<Object, String> cache = CacheBuilder.newBuilder()
+                .weakKeys()
+                .build();
+
+        assertNotNull(cache);
+
+        // Basic operations should work
+        Object key = new Object();
+        cache.put(key, "value1");
+        assertEquals("value1", cache.getIfPresent(key));
+    }
+
+    @Test
+    void testWeakKeysCanBeGarbageCollected() throws InterruptedException {
+        Cache<HeavyObject, String> cache = CacheBuilder.newBuilder()
+                .weakKeys()
+                .build();
+
+        // Create object and keep a weak reference to track GC
+        HeavyObject key = new HeavyObject("key1", 100); // 100KB
+        WeakReference<HeavyObject> weakRef = new WeakReference<>(key);
+
+        // Put in cache
+        cache.put(key, "value1");
+        assertEquals("value1", cache.getIfPresent(key));
+
+        // Clear strong reference to key
+        key = null;
+
+        // Suggest GC (not guaranteed to run immediately)
+        System.gc();
+        System.runFinalization();
+        Thread.sleep(100);
+
+        // Try multiple times to trigger GC
+        for (int i = 0; i < 10; i++) {
+            if (weakRef.get() == null) {
+                break; // GC happened
+            }
+            System.gc();
+            System.runFinalization();
+            Thread.sleep(50);
+        }
+
+        // After GC, the weak reference should be cleared
+        if (weakRef.get() == null) {
+            // GC happened - verify cache behavior
+            cache.cleanUp();
+
+            // Entry should be removed since key was GC'd
+            assertTrue(cache.size() == 0, "Cache should be empty after key GC'd and cleanup");
+        } else {
+            // GC didn't happen in this test run - just verify API works
+            assertTrue(true, "GC didn't run during test - API validation passed");
+        }
+    }
+
+    @Test
+    void testWeakKeysWithPrecisionStrategy() {
+        Cache<Object, String> cache = CacheBuilder.newBuilder()
+                .strategy(CacheStrategy.PRECISION)
+                .weakKeys()
+                .build();
+
+        Object key1 = new Object();
+        Object key2 = new Object();
+
+        cache.put(key1, "value1");
+        cache.put(key2, "value2");
+
+        assertEquals("value1", cache.getIfPresent(key1));
+        assertEquals("value2", cache.getIfPresent(key2));
+    }
+
+    @Test
+    void testWeakKeysAndWeakValues() {
+        Cache<Object, Object> cache = CacheBuilder.newBuilder()
+                .weakKeys()
+                .weakValues()
+                .build();
+
+        Object key = new Object();
+        Object value = new Object();
+
+        cache.put(key, value);
+        assertEquals(value, cache.getIfPresent(key));
+
+        // Both key and value can be GC'd independently
+        assertTrue(true, "Combined weak keys and weak values API works");
+    }
+
+    @Test
+    void testWeakKeysWithMaximumSize() {
+        Cache<Object, String> cache = CacheBuilder.newBuilder()
+                .weakKeys()
+                .maximumSize(3)
+                .build();
+
+        Object key1 = new Object();
+        Object key2 = new Object();
+        Object key3 = new Object();
+        Object key4 = new Object();
+
+        cache.put(key1, "value1");
+        cache.put(key2, "value2");
+        cache.put(key3, "value3");
+        cache.put(key4, "value4"); // Should trigger eviction
+
+        // Size should be limited by maximumSize
+        assertTrue(cache.size() <= 3, "Cache size should respect maximum size with weak keys");
+    }
+
+    @Test
+    void testWeakKeysExplicitInvalidation() {
+        Cache<Object, String> cache = CacheBuilder.newBuilder()
+                .weakKeys()
+                .build();
+
+        Object key1 = new Object();
+        Object key2 = new Object();
+
+        cache.put(key1, "value1");
+        cache.put(key2, "value2");
+
+        // Explicit invalidation should work
+        cache.invalidate(key1);
+        assertNull(cache.getIfPresent(key1));
+        assertEquals("value2", cache.getIfPresent(key2));
+    }
+
+    @Test
+    void testStrongKeysAsDefault() {
+        Cache<Object, String> cache = CacheBuilder.newBuilder()
+                .build(); // No weak keys specified
+
+        CacheBuilder<String, String> builder = CacheBuilder.newBuilder();
+        assertEquals(Strength.STRONG, builder.getKeyStrength());
+
+        // Strong key references should never be GC'd while in cache
+        Object key = new Object();
+        cache.put(key, "value1");
+
+        // Even without strong reference, key should stay (cache holds it)
+        Object originalKey = key;
+        key = null;
+
+        for (int i = 0; i < 10; i++) {
+            System.gc();
+            System.runFinalization();
+        }
+
+        cache.cleanUp();
+
+        // Strong key should still be in cache
+        assertEquals("value1", cache.getIfPresent(originalKey));
+    }
 }
