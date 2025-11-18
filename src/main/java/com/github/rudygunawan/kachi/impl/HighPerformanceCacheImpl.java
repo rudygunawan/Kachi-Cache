@@ -18,6 +18,7 @@ import com.github.rudygunawan.kachi.policy.FrequencySketch;
 import com.github.rudygunawan.kachi.policy.Policy;
 import com.github.rudygunawan.kachi.policy.PutCause;
 import com.github.rudygunawan.kachi.policy.RemovalCause;
+import com.github.rudygunawan.kachi.policy.Strength;
 
 import java.util.*;
 import java.util.concurrent.*;
@@ -121,6 +122,10 @@ public class HighPerformanceCacheImpl<K, V> implements LoadingCache<K, V>, Cache
     private final RefreshPolicy<? super K, ? super V> refreshPolicy;
     private final long refreshAfterWriteNanos;
 
+    // Reference strength for GC-aware caching
+    private final Strength valueStrength;
+    private final ReferenceQueue<V> valueReferenceQueue;
+
     // Statistics
     private final AtomicLong hitCount = new AtomicLong(0);
     private final AtomicLong missCount = new AtomicLong(0);
@@ -179,6 +184,10 @@ public class HighPerformanceCacheImpl<K, V> implements LoadingCache<K, V>, Cache
         this.expiry = (Expiry<? super K, ? super V>) builder.getExpiry();
         this.refreshPolicy = (RefreshPolicy<? super K, ? super V>) builder.getRefreshPolicy();
         this.refreshAfterWriteNanos = builder.getRefreshAfterWriteNanos();
+
+        // Initialize reference strength for GC-aware caching
+        this.valueStrength = builder.getValueStrength();
+        this.valueReferenceQueue = (valueStrength != Strength.STRONG) ? new ReferenceQueue<>() : null;
 
         // Initialize Window TinyLFU segments if that policy is selected
         if (evictionPolicy == EvictionPolicy.WINDOW_TINY_LFU && maximumSize > 0) {
@@ -515,8 +524,9 @@ public class HighPerformanceCacheImpl<K, V> implements LoadingCache<K, V>, Cache
         // Calculate weight
         int weight = calculateWeight(key, value);
 
-        // Create FastCacheEntry (MUCH faster: ~150ns vs ~450ns)
-        FastCacheEntry<V> newEntry = new FastCacheEntry<>(value, ttl, weight, currentTime);
+        // Create FastCacheEntry with value reference strength (MUCH faster: ~150ns vs ~450ns)
+        FastCacheEntry<V> newEntry = new FastCacheEntry<>(value, ttl, weight, currentTime,
+                valueStrength, valueReferenceQueue);
 
         // Put into map
         oldEntry = storage.put(key, newEntry);
@@ -629,26 +639,61 @@ public class HighPerformanceCacheImpl<K, V> implements LoadingCache<K, V>, Cache
         long now = System.nanoTime();
         List<K> keysToRemove = new ArrayList<>();
 
-        // Find expired entries
+        // Find expired entries and entries with GC'd values
         for (Map.Entry<K, FastCacheEntry<V>> entry : storage.entrySet()) {
-            if (isExpired(entry.getValue(), now)) {
+            FastCacheEntry<V> cacheEntry = entry.getValue();
+            if (isExpired(cacheEntry, now) || cacheEntry.isValueCleared()) {
                 keysToRemove.add(entry.getKey());
             }
         }
 
-        // Remove expired entries - lock-free
+        // Remove expired entries and GC'd values - lock-free
         for (K key : keysToRemove) {
-            // Double-check entry still exists and is expired
+            // Double-check entry still exists
             FastCacheEntry<V> entry = storage.get(key);
-            if (entry != null && isExpired(entry, now)) {
-                storage.remove(key);
-                // Subtract the expired entry's weight
-                currentWeight.addAndGet(-entry.getWeight());
-                removeFromEvictionQueues(key);
-                fireRemovalEvent(key, entry.getValue(), RemovalCause.EXPIRED);
-                fireEvictionEvent(key, entry.getValue(), RemovalCause.EXPIRED);
-                if (recordStats) evictionCount.incrementAndGet();
+            if (entry != null) {
+                boolean isExpired = isExpired(entry, now);
+                boolean isCleared = entry.isValueCleared();
+
+                if (isExpired || isCleared) {
+                    storage.remove(key);
+                    // Subtract the entry's weight
+                    currentWeight.addAndGet(-entry.getWeight());
+                    removeFromEvictionQueues(key);
+
+                    // Get value before it might be fully cleared (may be null if GC'd)
+                    V value = entry.getValue();
+
+                    if (isExpired) {
+                        fireRemovalEvent(key, value, RemovalCause.EXPIRED);
+                        fireEvictionEvent(key, value, RemovalCause.EXPIRED);
+                    } else {
+                        // Value was GC'd - treat as explicit removal
+                        fireRemovalEvent(key, value, RemovalCause.EXPLICIT);
+                    }
+
+                    if (recordStats) evictionCount.incrementAndGet();
+                }
             }
+        }
+
+        // Poll reference queue for GC'd values (non-blocking)
+        if (valueReferenceQueue != null) {
+            cleanUpGarbageCollectedValues();
+        }
+    }
+
+    /**
+     * Cleans up entries whose values have been garbage collected.
+     * This method polls the reference queue and removes entries with cleared value references.
+     */
+    private void cleanUpGarbageCollectedValues() {
+        // Poll all cleared references from the queue (non-blocking)
+        // Note: We can't easily map from ValueReference back to key, so we rely on
+        // the periodic scan in cleanUp() to find and remove entries with cleared values
+        while (valueReferenceQueue.poll() != null) {
+            // Reference has been cleared by GC
+            // The actual entry removal happens in the main cleanUp() scan above
         }
     }
 

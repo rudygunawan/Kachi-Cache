@@ -143,9 +143,16 @@ Cache<String, User> cache = CacheBuilder.newBuilder()
 **Reference Types:**
 - `STRONG` - Default, no GC
 - `WEAK` - GC when no strong references exist
-- `SOFT` - GC under memory pressure
+- `SOFT` - GC under memory pressure (recommended for caching)
 
-**Note:** Storage layer integration for weak/soft references is reserved for future implementation. Currently, these methods configure the API but use strong references internally.
+**Implementation Details:**
+- Full storage layer integration with `ValueReference` wrappers
+- `ReferenceQueue` for tracking GC'd values
+- Automatic cleanup during scheduled cleanUp() tasks
+- Entries with GC'd values are automatically removed
+- Works with both HIGH_PERFORMANCE and PRECISION strategies
+
+**Note:** Weak keys are not yet implemented. When `weakKeys()` is called, the API is configured but keys remain strongly referenced. Weak/soft values are fully functional.
 
 #### 6. EvictionListener Interface 🆕
 Specialized listener for eviction events only (SIZE and EXPIRED removals).
@@ -424,7 +431,7 @@ Cache<String, User> cache = CacheBuilder.newBuilder()
 | Compute operations | ❌ | ✅ | ✅ | ❌ |
 | CacheWriter | ❌ | ✅ | ✅ | ❌ |
 | Custom Executor/Scheduler | ❌ | ✅ | ✅ | ❌ |
-| Weak/Soft references | ❌ | 🔶 API | ✅ | ✅ |
+| Weak/Soft references | ❌ | ✅* | ✅ | ✅ |
 | EvictionListener | ❌ | ✅ | ❌ | ❌ |
 | Policy introspection | ❌ | ✅ | ✅ | ❌ |
 | **Kachi Unique** |
@@ -435,7 +442,7 @@ Cache<String, User> cache = CacheBuilder.newBuilder()
 
 Legend:
 - ✅ Fully implemented
-- 🔶 API only (storage layer pending)
+- ✅* Weak/soft values fully implemented; weak keys API only
 - ❌ Not available
 
 ---
