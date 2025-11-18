@@ -1,9 +1,16 @@
 package com.github.rudygunawan.kachi.model;
 
+import com.github.rudygunawan.kachi.policy.Strength;
+import com.github.rudygunawan.kachi.reference.ValueReference;
+
+import java.lang.ref.ReferenceQueue;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * A cache entry that wraps a value with metadata for expiration and access tracking.
+ *
+ * <p><b>Reference Strength Support:</b>
+ * <p>Supports strong, weak, and soft value references for GC-aware caching.
  *
  * @param <V> the type of the cached value
  */
@@ -12,7 +19,7 @@ public class CacheEntry<V> {
     // This prevents rapid thrashing while still allowing timely eviction
     private static final long MIN_EVICTION_AGE_NANOS = 1_000_000_000L; // 1 second
 
-    private final V value;
+    private final ValueReference<V> valueRef;
     private final long writeTime;
     private final long expirationTime;
     private final AtomicLong accessTime;
@@ -21,7 +28,7 @@ public class CacheEntry<V> {
     private final int weight;
 
     /**
-     * Creates a new cache entry with the specified value and expiration.
+     * Creates a new cache entry with the specified value and expiration (strong reference).
      *
      * @param value the value to cache
      * @param ttlNanos the time-to-live in nanoseconds, or 0 for no expiration
@@ -31,14 +38,27 @@ public class CacheEntry<V> {
     }
 
     /**
-     * Creates a new cache entry with the specified value, expiration, and weight.
+     * Creates a new cache entry with the specified value, expiration, and weight (strong reference).
      *
      * @param value the value to cache
      * @param ttlNanos the time-to-live in nanoseconds, or 0 for no expiration
      * @param weight the weight of this entry for size-based eviction
      */
     public CacheEntry(V value, long ttlNanos, int weight) {
-        this.value = value;
+        this(value, ttlNanos, weight, Strength.STRONG, null);
+    }
+
+    /**
+     * Creates a new cache entry with configurable value reference strength.
+     *
+     * @param value the value to cache
+     * @param ttlNanos the time-to-live in nanoseconds, or 0 for no expiration
+     * @param weight the weight of this entry for size-based eviction
+     * @param valueStrength the reference strength for the value
+     * @param valueQueue the reference queue for GC notifications (null for STRONG)
+     */
+    public CacheEntry(V value, long ttlNanos, int weight, Strength valueStrength, ReferenceQueue<V> valueQueue) {
+        this.valueRef = ValueReference.create(value, valueStrength, valueQueue);
         this.writeTime = System.nanoTime();
         this.expirationTime = ttlNanos > 0 ? writeTime + ttlNanos : Long.MAX_VALUE;
         this.accessTime = new AtomicLong(writeTime);
@@ -48,10 +68,21 @@ public class CacheEntry<V> {
     }
 
     /**
-     * Returns the cached value.
+     * Returns the cached value, or null if it has been garbage collected.
+     *
+     * @return the value, or null if the value was collected by GC
      */
     public V getValue() {
-        return value;
+        return valueRef.get();
+    }
+
+    /**
+     * Checks if the value reference has been cleared by GC.
+     *
+     * @return true if the value was collected, false otherwise
+     */
+    public boolean isValueCleared() {
+        return valueRef.isCleared();
     }
 
     /**
