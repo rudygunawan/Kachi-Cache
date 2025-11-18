@@ -16,9 +16,11 @@ import com.github.rudygunawan.kachi.impl.ConcurrentCacheImpl;
 import com.github.rudygunawan.kachi.impl.HighPerformanceCacheImpl;
 import com.github.rudygunawan.kachi.impl.PrecisionCacheImpl;
 import com.github.rudygunawan.kachi.listener.CacheWriter;
+import com.github.rudygunawan.kachi.listener.EvictionListener;
 import com.github.rudygunawan.kachi.listener.PutListener;
 import com.github.rudygunawan.kachi.listener.RemovalListener;
 import com.github.rudygunawan.kachi.policy.EvictionPolicy;
+import com.github.rudygunawan.kachi.policy.Strength;
 
 import java.util.concurrent.Executor;
 import java.util.concurrent.ScheduledExecutorService;
@@ -71,6 +73,7 @@ public class CacheBuilder<K, V> {
     private boolean recordStats = false;
     private EvictionPolicy evictionPolicy = EvictionPolicy.LRU;
     private RemovalListener<? super K, ? super V> removalListener;
+    private EvictionListener<? super K, ? super V> evictionListener;
     private PutListener<? super K, ? super V> putListener;
     private CacheWriter<? super K, ? super V> cacheWriter;
     private Expiry<? super K, ? super V> expiry;
@@ -79,6 +82,8 @@ public class CacheBuilder<K, V> {
     private CacheStrategy strategy = CacheStrategy.HIGH_PERFORMANCE; // Default to fast
     private Executor executor;
     private ScheduledExecutorService scheduler;
+    private Strength keyStrength = Strength.STRONG;
+    private Strength valueStrength = Strength.STRONG;
 
     private CacheBuilder() {
     }
@@ -569,6 +574,109 @@ public class CacheBuilder<K, V> {
     }
 
     /**
+     * Specifies that keys should be wrapped in weak references.
+     *
+     * <p>Keys will be eligible for garbage collection when no strong references exist to them,
+     * even though they are still in the cache. This is useful for canonicalizing mappings.
+     *
+     * <p><b>Warning:</b> When this method is used, the resulting cache will use identity (==)
+     * comparison to determine equality of keys.
+     *
+     * <p><b>Note:</b> This feature is currently documented but not fully implemented in the
+     * cache storage layer. It is reserved for future implementation.
+     *
+     * @return this builder instance
+     */
+    public CacheBuilder<K, V> weakKeys() {
+        this.keyStrength = Strength.WEAK;
+        return this;
+    }
+
+    /**
+     * Specifies that values should be wrapped in weak references.
+     *
+     * <p>Values will be eligible for garbage collection when no strong references exist to them,
+     * even though they are still in the cache.
+     *
+     * <p><b>Warning:</b> When this method is used, the resulting cache will use identity (==)
+     * comparison to determine equality of values.
+     *
+     * <p><b>Note:</b> This feature is currently documented but not fully implemented in the
+     * cache storage layer. It is reserved for future implementation.
+     *
+     * @return this builder instance
+     */
+    public CacheBuilder<K, V> weakValues() {
+        this.valueStrength = Strength.WEAK;
+        return this;
+    }
+
+    /**
+     * Specifies that values should be wrapped in soft references.
+     *
+     * <p>Values will be eligible for garbage collection under memory pressure, but will be
+     * retained as long as memory is available. The JVM will prefer to collect soft references
+     * before throwing an {@link OutOfMemoryError}.
+     *
+     * <p>This is useful for memory-sensitive caches such as image caches or document caches
+     * that can be reconstructed if needed.
+     *
+     * <p><b>Note:</b> This feature is currently documented but not fully implemented in the
+     * cache storage layer. It is reserved for future implementation.
+     *
+     * @return this builder instance
+     */
+    public CacheBuilder<K, V> softValues() {
+        this.valueStrength = Strength.SOFT;
+        return this;
+    }
+
+    /**
+     * Specifies a listener instance for eviction events (SIZE and EXPIRED removals only).
+     *
+     * <p>The {@link EvictionListener} is a specialized version of {@link RemovalListener} that
+     * only receives notifications for automatic evictions, not for explicit invalidations or
+     * replacements. Both listeners can be configured simultaneously.
+     *
+     * <p><b>Example - Resource Cleanup:</b>
+     * <pre>{@code
+     * Cache<String, FileHandle> cache = CacheBuilder.newBuilder()
+     *     .maximumSize(100)
+     *     .evictionListener((key, handle, cause) -> {
+     *         handle.close();  // Clean up when evicted
+     *     })
+     *     .build();
+     * }</pre>
+     *
+     * <p><b>Example - Multi-Level Cache:</b>
+     * <pre>{@code
+     * Cache<String, Data> l1Cache = CacheBuilder.newBuilder()
+     *     .maximumSize(100)
+     *     .evictionListener((key, data, cause) -> {
+     *         l2Cache.put(key, data);  // Move to L2 when evicted from L1
+     *     })
+     *     .build();
+     * }</pre>
+     *
+     * <p><b>Warning:</b> all exceptions thrown by {@code listener} will be logged and then swallowed.
+     *
+     * @param listener the eviction listener to use
+     * @return this builder instance
+     * @see EvictionListener
+     * @see RemovalListener
+     */
+    public <K1 extends K, V1 extends V> CacheBuilder<K1, V1> evictionListener(
+            EvictionListener<? super K1, ? super V1> listener) {
+        if (listener == null) {
+            throw new NullPointerException("eviction listener cannot be null");
+        }
+        @SuppressWarnings("unchecked")
+        CacheBuilder<K1, V1> me = (CacheBuilder<K1, V1>) this;
+        me.evictionListener = listener;
+        return me;
+    }
+
+    /**
      * Specifies a custom expiration policy that determines how long each entry should be retained
      * in the cache. This allows different entries to have different expiration times based on their
      * key, value, or other application-specific logic.
@@ -866,5 +974,17 @@ public class CacheBuilder<K, V> {
 
     public ScheduledExecutorService getScheduler() {
         return scheduler;
+    }
+
+    public EvictionListener<? super K, ? super V> getEvictionListener() {
+        return evictionListener;
+    }
+
+    public Strength getKeyStrength() {
+        return keyStrength;
+    }
+
+    public Strength getValueStrength() {
+        return valueStrength;
     }
 }

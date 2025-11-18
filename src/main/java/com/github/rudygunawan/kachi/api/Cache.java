@@ -1,6 +1,7 @@
 package com.github.rudygunawan.kachi.api;
 
 import com.github.rudygunawan.kachi.model.CacheStats;
+import com.github.rudygunawan.kachi.policy.Policy;
 
 import java.util.Map;
 import java.util.concurrent.Callable;
@@ -232,4 +233,42 @@ public interface Cache<K, V> {
      * @throws RuntimeException if the remappingFunction throws an exception
      */
     V merge(K key, V value, BiFunction<? super V, ? super V, ? extends V> remappingFunction);
+
+    /**
+     * Returns access to inspect and modify the cache's operational characteristics at runtime.
+     *
+     * <p>The policy provides introspection and modification capabilities for:
+     * <ul>
+     *   <li>Eviction settings (maximum size, eviction policy, current weight)</li>
+     *   <li>Expiration settings (TTL after write/access, entry age)</li>
+     * </ul>
+     *
+     * <p><b>Example usage:</b>
+     * <pre>{@code
+     * Cache<String, User> cache = CacheBuilder.newBuilder()
+     *     .maximumSize(1000)
+     *     .expireAfterWrite(10, TimeUnit.MINUTES)
+     *     .build();
+     *
+     * Policy<String, User> policy = cache.policy();
+     *
+     * // Inspect current settings
+     * policy.eviction().ifPresent(eviction -> {
+     *     System.out.println("Max: " + eviction.getMaximum());
+     *     System.out.println("Current: " + eviction.weightedSize());
+     * });
+     *
+     * // Dynamically resize
+     * policy.eviction().ifPresent(eviction -> eviction.setMaximum(2000));
+     *
+     * // Query entry age
+     * policy.expiration().ifPresent(expiration -> {
+     *     long age = expiration.ageOf("userId");
+     *     System.out.println("Entry age: " + age + " ns");
+     * });
+     * }</pre>
+     *
+     * @return access to the cache's policy
+     */
+    Policy<K, V> policy();
 }

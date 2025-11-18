@@ -6,6 +6,7 @@ import com.github.rudygunawan.kachi.api.LoadingCache;
 import com.github.rudygunawan.kachi.api.RefreshPolicy;
 import com.github.rudygunawan.kachi.api.Weigher;
 import com.github.rudygunawan.kachi.builder.CacheBuilder;
+import com.github.rudygunawan.kachi.listener.EvictionListener;
 import com.github.rudygunawan.kachi.listener.PutListener;
 import com.github.rudygunawan.kachi.listener.RemovalListener;
 import com.github.rudygunawan.kachi.metrics.CacheMetrics;
@@ -14,6 +15,7 @@ import com.github.rudygunawan.kachi.model.CacheStats;
 import com.github.rudygunawan.kachi.model.FastCacheEntry;
 import com.github.rudygunawan.kachi.policy.EvictionPolicy;
 import com.github.rudygunawan.kachi.policy.FrequencySketch;
+import com.github.rudygunawan.kachi.policy.Policy;
 import com.github.rudygunawan.kachi.policy.PutCause;
 import com.github.rudygunawan.kachi.policy.RemovalCause;
 
@@ -114,6 +116,7 @@ public class HighPerformanceCacheImpl<K, V> implements LoadingCache<K, V>, Cache
     private final EvictionPolicy evictionPolicy;
     private final RemovalListener<? super K, ? super V> removalListener;
     private final PutListener<? super K, ? super V> putListener;
+    private final EvictionListener<? super K, ? super V> evictionListener;
     private final Expiry<? super K, ? super V> expiry;
     private final RefreshPolicy<? super K, ? super V> refreshPolicy;
     private final long refreshAfterWriteNanos;
@@ -172,6 +175,7 @@ public class HighPerformanceCacheImpl<K, V> implements LoadingCache<K, V>, Cache
         this.evictionPolicy = builder.getEvictionPolicy();
         this.removalListener = (RemovalListener<? super K, ? super V>) builder.getRemovalListener();
         this.putListener = (PutListener<? super K, ? super V>) builder.getPutListener();
+        this.evictionListener = (EvictionListener<? super K, ? super V>) builder.getEvictionListener();
         this.expiry = (Expiry<? super K, ? super V>) builder.getExpiry();
         this.refreshPolicy = (RefreshPolicy<? super K, ? super V>) builder.getRefreshPolicy();
         this.refreshAfterWriteNanos = builder.getRefreshAfterWriteNanos();
@@ -642,6 +646,7 @@ public class HighPerformanceCacheImpl<K, V> implements LoadingCache<K, V>, Cache
                 currentWeight.addAndGet(-entry.getWeight());
                 removeFromEvictionQueues(key);
                 fireRemovalEvent(key, entry.getValue(), RemovalCause.EXPIRED);
+                fireEvictionEvent(key, entry.getValue(), RemovalCause.EXPIRED);
                 if (recordStats) evictionCount.incrementAndGet();
             }
         }
@@ -823,6 +828,7 @@ public class HighPerformanceCacheImpl<K, V> implements LoadingCache<K, V>, Cache
             currentWeight.addAndGet(-removed.getWeight());
             removeFromEvictionQueues(key);
             fireRemovalEvent(key, removed.getValue(), RemovalCause.SIZE);
+            fireEvictionEvent(key, removed.getValue(), RemovalCause.SIZE);
 
             if (recordStats) {
                 evictionCount.incrementAndGet();
@@ -896,6 +902,27 @@ public class HighPerformanceCacheImpl<K, V> implements LoadingCache<K, V>, Cache
             } catch (Exception e) {
                 // Log and swallow exceptions from listener
                 LOGGER.log(Level.WARNING, "PutListener threw exception for key: " + key +
+                          ", cause: " + cause, e);
+            }
+        }
+    }
+
+    /**
+     * Fires an eviction event to the configured eviction listener.
+     * Eviction events are only fired for SIZE and EXPIRED removals (not EXPLICIT or REPLACED).
+     * Exceptions thrown by the listener are logged and swallowed to prevent cache operation failures.
+     *
+     * @param key the key that was evicted
+     * @param value the value that was evicted
+     * @param cause the reason for eviction (SIZE or EXPIRED only)
+     */
+    private void fireEvictionEvent(K key, V value, RemovalCause cause) {
+        if (evictionListener != null && cause.wasEvicted()) {
+            try {
+                evictionListener.onEviction(key, value, cause);
+            } catch (Exception e) {
+                // Log and swallow exceptions from listener
+                LOGGER.log(Level.WARNING, "EvictionListener threw exception for key: " + key +
                           ", cause: " + cause, e);
             }
         }
@@ -1250,5 +1277,102 @@ public class HighPerformanceCacheImpl<K, V> implements LoadingCache<K, V>, Cache
             put(key, newValue);
             return newValue;
         }
+    }
+
+    @Override
+    public Policy<K, V> policy() {
+        return new Policy<K, V>() {
+            @Override
+            public Optional<Policy.Eviction<K, V>> eviction() {
+                if (maximumSize <= 0 && maximumWeight <= 0) {
+                    return Optional.empty();
+                }
+                return Optional.of(new Policy.Eviction<K, V>() {
+                    private volatile long mutableMaximumSize = maximumSize;
+                    private volatile long mutableMaximumWeight = maximumWeight;
+
+                    @Override
+                    public long getMaximum() {
+                        return (weigher == null) ? mutableMaximumSize : mutableMaximumWeight;
+                    }
+
+                    @Override
+                    public void setMaximum(long maximum) {
+                        if (maximum < 0) {
+                            throw new IllegalArgumentException("maximum cannot be negative");
+                        }
+                        if (weigher == null) {
+                            mutableMaximumSize = maximum;
+                        } else {
+                            mutableMaximumWeight = maximum;
+                        }
+                        // Trigger eviction if needed
+                        cleanUp();
+                    }
+
+                    @Override
+                    public long weightedSize() {
+                        return (weigher == null) ? storage.size() : currentWeight.get();
+                    }
+
+                    @Override
+                    public boolean isWeighted() {
+                        return weigher != null;
+                    }
+
+                    @Override
+                    public EvictionPolicy getEvictionPolicy() {
+                        return evictionPolicy;
+                    }
+                });
+            }
+
+            @Override
+            public Optional<Policy.Expiration<K, V>> expiration() {
+                if (expireAfterWriteNanos <= 0 && expireAfterAccessNanos <= 0 && expiry == null) {
+                    return Optional.empty();
+                }
+                return Optional.of(new Policy.Expiration<K, V>() {
+                    private volatile long mutableExpireAfterWriteNanos = expireAfterWriteNanos;
+                    private volatile long mutableExpireAfterAccessNanos = expireAfterAccessNanos;
+
+                    @Override
+                    public long getExpiresAfterWrite() {
+                        return mutableExpireAfterWriteNanos;
+                    }
+
+                    @Override
+                    public void setExpiresAfterWrite(long durationNanos) {
+                        if (durationNanos < 0) {
+                            throw new IllegalArgumentException("duration cannot be negative");
+                        }
+                        mutableExpireAfterWriteNanos = durationNanos;
+                    }
+
+                    @Override
+                    public long getExpiresAfterAccess() {
+                        return mutableExpireAfterAccessNanos;
+                    }
+
+                    @Override
+                    public void setExpiresAfterAccess(long durationNanos) {
+                        if (durationNanos < 0) {
+                            throw new IllegalArgumentException("duration cannot be negative");
+                        }
+                        mutableExpireAfterAccessNanos = durationNanos;
+                    }
+
+                    @Override
+                    public long ageOf(K key) {
+                        FastCacheEntry<V> entry = storage.get(key);
+                        if (entry == null) {
+                            return -1;
+                        }
+                        long now = System.nanoTime();
+                        return now - entry.getWriteTime();
+                    }
+                });
+            }
+        };
     }
 }
