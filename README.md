@@ -1,6 +1,6 @@
 # Kachi Cache
 
-> Currently Alpha version (0.1.0). Feel free to try and give feedback!
+> Currently Alpha version (0.3.0). Feel free to try and give feedback!
 
 **Kachi** (カチ) - _pronounced "kah-chee"_
 
