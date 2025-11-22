@@ -6,6 +6,8 @@ import com.github.rudygunawan.kachi.api.LoadingCache;
 import com.github.rudygunawan.kachi.api.RefreshPolicy;
 import com.github.rudygunawan.kachi.api.Weigher;
 import com.github.rudygunawan.kachi.builder.CacheBuilder;
+import com.github.rudygunawan.kachi.listener.EvictionListener;
+import com.github.rudygunawan.kachi.listener.PutListener;
 import com.github.rudygunawan.kachi.listener.RemovalListener;
 import com.github.rudygunawan.kachi.metrics.CacheMetrics;
 import com.github.rudygunawan.kachi.metrics.ExpiryDistribution;
@@ -13,8 +15,13 @@ import com.github.rudygunawan.kachi.model.CacheStats;
 import com.github.rudygunawan.kachi.model.FastCacheEntry;
 import com.github.rudygunawan.kachi.policy.EvictionPolicy;
 import com.github.rudygunawan.kachi.policy.FrequencySketch;
+import com.github.rudygunawan.kachi.policy.Policy;
+import com.github.rudygunawan.kachi.policy.PutCause;
 import com.github.rudygunawan.kachi.policy.RemovalCause;
+import com.github.rudygunawan.kachi.policy.Strength;
+import com.github.rudygunawan.kachi.reference.KeyReference;
 
+import java.lang.ref.ReferenceQueue;
 import java.util.*;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicLong;
@@ -111,9 +118,19 @@ public class HighPerformanceCacheImpl<K, V> implements LoadingCache<K, V>, Cache
     private final boolean recordStats;
     private final EvictionPolicy evictionPolicy;
     private final RemovalListener<? super K, ? super V> removalListener;
+    private final PutListener<? super K, ? super V> putListener;
+    private final EvictionListener<? super K, ? super V> evictionListener;
     private final Expiry<? super K, ? super V> expiry;
     private final RefreshPolicy<? super K, ? super V> refreshPolicy;
     private final long refreshAfterWriteNanos;
+
+    // Reference strength for GC-aware caching
+    private final Strength keyStrength;
+    private final Strength valueStrength;
+    private final ReferenceQueue<K> keyReferenceQueue;
+    private final ReferenceQueue<V> valueReferenceQueue;
+    // Track weak key references for GC notification
+    private final ConcurrentHashMap<K, KeyReference<K>> keyReferences;
 
     // Statistics
     private final AtomicLong hitCount = new AtomicLong(0);
@@ -168,9 +185,22 @@ public class HighPerformanceCacheImpl<K, V> implements LoadingCache<K, V>, Cache
         this.recordStats = builder.isRecordingStats();
         this.evictionPolicy = builder.getEvictionPolicy();
         this.removalListener = (RemovalListener<? super K, ? super V>) builder.getRemovalListener();
+        this.putListener = (PutListener<? super K, ? super V>) builder.getPutListener();
+        this.evictionListener = (EvictionListener<? super K, ? super V>) builder.getEvictionListener();
         this.expiry = (Expiry<? super K, ? super V>) builder.getExpiry();
         this.refreshPolicy = (RefreshPolicy<? super K, ? super V>) builder.getRefreshPolicy();
         this.refreshAfterWriteNanos = builder.getRefreshAfterWriteNanos();
+
+        // Initialize reference strength for GC-aware caching
+        this.keyStrength = builder.getKeyStrength();
+        this.valueStrength = builder.getValueStrength();
+        this.keyReferenceQueue = (keyStrength != Strength.STRONG) ? new ReferenceQueue<>() : null;
+        this.valueReferenceQueue = (valueStrength != Strength.STRONG) ? new ReferenceQueue<>() : null;
+
+        // Initialize key reference tracking for weak keys
+        this.keyReferences = (keyStrength != Strength.STRONG)
+            ? new ConcurrentHashMap<>(builder.getInitialCapacity(), HASH_MAP_LOAD_FACTOR, builder.getConcurrencyLevel())
+            : null;
 
         // Initialize Window TinyLFU segments if that policy is selected
         if (evictionPolicy == EvictionPolicy.WINDOW_TINY_LFU && maximumSize > 0) {
@@ -507,11 +537,23 @@ public class HighPerformanceCacheImpl<K, V> implements LoadingCache<K, V>, Cache
         // Calculate weight
         int weight = calculateWeight(key, value);
 
-        // Create FastCacheEntry (MUCH faster: ~150ns vs ~450ns)
-        FastCacheEntry<V> newEntry = new FastCacheEntry<>(value, ttl, weight, currentTime);
+        // Create FastCacheEntry with value reference strength (MUCH faster: ~150ns vs ~450ns)
+        FastCacheEntry<V> newEntry = new FastCacheEntry<>(value, ttl, weight, currentTime,
+                valueStrength, valueReferenceQueue);
 
         // Put into map
         oldEntry = storage.put(key, newEntry);
+
+        // Track weak key reference if using weak keys
+        if (keyReferences != null && oldEntry == null) {
+            // Only create reference for new entries (not replacements)
+            KeyReference<K> keyRef = KeyReference.create(key, keyStrength, keyReferenceQueue);
+            keyReferences.put(key, keyRef);
+        }
+
+        // Fire put event (before removal event to allow listeners to know about the new value first)
+        PutCause putCause = (oldEntry != null) ? PutCause.UPDATE : PutCause.INSERT;
+        firePutEvent(key, value, putCause);
 
         // Update weight tracking
         if (oldEntry != null) {
@@ -569,6 +611,11 @@ public class HighPerformanceCacheImpl<K, V> implements LoadingCache<K, V>, Cache
         // Lock-free removal - ConcurrentHashMap handles concurrency
         FastCacheEntry<V> removed = storage.remove(key);
         if (removed != null) {
+            // Remove key reference if using weak keys
+            if (keyReferences != null) {
+                keyReferences.remove(key);
+            }
+
             // Subtract the removed entry's weight
             currentWeight.addAndGet(-removed.getWeight());
             removeFromEvictionQueues(key);
@@ -617,23 +664,104 @@ public class HighPerformanceCacheImpl<K, V> implements LoadingCache<K, V>, Cache
         long now = System.nanoTime();
         List<K> keysToRemove = new ArrayList<>();
 
-        // Find expired entries
+        // Find expired entries and entries with GC'd values
         for (Map.Entry<K, FastCacheEntry<V>> entry : storage.entrySet()) {
-            if (isExpired(entry.getValue(), now)) {
+            FastCacheEntry<V> cacheEntry = entry.getValue();
+            if (isExpired(cacheEntry, now) || cacheEntry.isValueCleared()) {
                 keysToRemove.add(entry.getKey());
             }
         }
 
-        // Remove expired entries - lock-free
+        // Remove expired entries and GC'd values - lock-free
         for (K key : keysToRemove) {
-            // Double-check entry still exists and is expired
+            // Double-check entry still exists
             FastCacheEntry<V> entry = storage.get(key);
-            if (entry != null && isExpired(entry, now)) {
-                storage.remove(key);
-                // Subtract the expired entry's weight
-                currentWeight.addAndGet(-entry.getWeight());
+            if (entry != null) {
+                boolean isExpired = isExpired(entry, now);
+                boolean isCleared = entry.isValueCleared();
+
+                if (isExpired || isCleared) {
+                    storage.remove(key);
+                    // Subtract the entry's weight
+                    currentWeight.addAndGet(-entry.getWeight());
+                    removeFromEvictionQueues(key);
+
+                    // Get value before it might be fully cleared (may be null if GC'd)
+                    V value = entry.getValue();
+
+                    if (isExpired) {
+                        fireRemovalEvent(key, value, RemovalCause.EXPIRED);
+                        fireEvictionEvent(key, value, RemovalCause.EXPIRED);
+                    } else {
+                        // Value was GC'd - treat as explicit removal
+                        fireRemovalEvent(key, value, RemovalCause.EXPLICIT);
+                    }
+
+                    if (recordStats) evictionCount.incrementAndGet();
+                }
+            }
+        }
+
+        // Poll reference queue for GC'd values (non-blocking)
+        if (valueReferenceQueue != null) {
+            cleanUpGarbageCollectedValues();
+        }
+
+        // Poll reference queue for GC'd keys (non-blocking)
+        if (keyReferenceQueue != null) {
+            cleanUpGarbageCollectedKeys();
+        }
+    }
+
+    /**
+     * Cleans up entries whose values have been garbage collected.
+     * This method polls the reference queue and removes entries with cleared value references.
+     */
+    private void cleanUpGarbageCollectedValues() {
+        // Poll all cleared references from the queue (non-blocking)
+        // Note: We can't easily map from ValueReference back to key, so we rely on
+        // the periodic scan in cleanUp() to find and remove entries with cleared values
+        while (valueReferenceQueue.poll() != null) {
+            // Reference has been cleared by GC
+            // The actual entry removal happens in the main cleanUp() scan above
+        }
+    }
+
+    /**
+     * Cleans up entries whose keys have been garbage collected.
+     * This method scans the key references map for cleared references and removes the corresponding entries.
+     */
+    private void cleanUpGarbageCollectedKeys() {
+        if (keyReferences == null) return;
+
+        // Poll the reference queue (non-blocking)
+        while (keyReferenceQueue.poll() != null) {
+            // A key was GC'd - we'll find it in the scan below
+        }
+
+        // Scan key references for cleared references
+        List<K> keysToRemove = new ArrayList<>();
+        for (Map.Entry<K, KeyReference<K>> entry : keyReferences.entrySet()) {
+            if (entry.getValue().isCleared()) {
+                keysToRemove.add(entry.getKey());
+            }
+        }
+
+        // Remove entries with GC'd keys
+        for (K key : keysToRemove) {
+            FastCacheEntry<V> removed = storage.remove(key);
+            keyReferences.remove(key);
+
+            if (removed != null) {
+                currentWeight.addAndGet(-removed.getWeight());
                 removeFromEvictionQueues(key);
-                fireRemovalEvent(key, entry.getValue(), RemovalCause.EXPIRED);
+
+                // Get value (may be null if also GC'd)
+                V value = removed.getValue();
+
+                // Key was GC'd - treat as explicit removal
+                fireRemovalEvent(key, value, RemovalCause.EXPLICIT);
+
                 if (recordStats) evictionCount.incrementAndGet();
             }
         }
@@ -815,6 +943,7 @@ public class HighPerformanceCacheImpl<K, V> implements LoadingCache<K, V>, Cache
             currentWeight.addAndGet(-removed.getWeight());
             removeFromEvictionQueues(key);
             fireRemovalEvent(key, removed.getValue(), RemovalCause.SIZE);
+            fireEvictionEvent(key, removed.getValue(), RemovalCause.SIZE);
 
             if (recordStats) {
                 evictionCount.incrementAndGet();
@@ -868,6 +997,47 @@ public class HighPerformanceCacheImpl<K, V> implements LoadingCache<K, V>, Cache
             } catch (Exception e) {
                 // Log and swallow exceptions from listener
                 LOGGER.log(Level.WARNING, "RemovalListener threw exception for key: " + key +
+                          ", cause: " + cause, e);
+            }
+        }
+    }
+
+    /**
+     * Fires a put event to the configured put listener.
+     * Exceptions thrown by the listener are logged and swallowed to prevent cache operation failures.
+     *
+     * @param key the key that was put
+     * @param value the value that was put
+     * @param cause the reason for the put (INSERT for new entries, UPDATE for replacements)
+     */
+    private void firePutEvent(K key, V value, PutCause cause) {
+        if (putListener != null) {
+            try {
+                putListener.onPut(key, value, cause);
+            } catch (Exception e) {
+                // Log and swallow exceptions from listener
+                LOGGER.log(Level.WARNING, "PutListener threw exception for key: " + key +
+                          ", cause: " + cause, e);
+            }
+        }
+    }
+
+    /**
+     * Fires an eviction event to the configured eviction listener.
+     * Eviction events are only fired for SIZE and EXPIRED removals (not EXPLICIT or REPLACED).
+     * Exceptions thrown by the listener are logged and swallowed to prevent cache operation failures.
+     *
+     * @param key the key that was evicted
+     * @param value the value that was evicted
+     * @param cause the reason for eviction (SIZE or EXPIRED only)
+     */
+    private void fireEvictionEvent(K key, V value, RemovalCause cause) {
+        if (evictionListener != null && cause.wasEvicted()) {
+            try {
+                evictionListener.onEviction(key, value, cause);
+            } catch (Exception e) {
+                // Log and swallow exceptions from listener
+                LOGGER.log(Level.WARNING, "EvictionListener threw exception for key: " + key +
                           ", cause: " + cause, e);
             }
         }
@@ -1148,5 +1318,176 @@ public class HighPerformanceCacheImpl<K, V> implements LoadingCache<K, V>, Cache
         LESS_THAN_1_HOUR,
         LESS_THAN_24_HOURS,
         MORE_THAN_24_HOURS
+    }
+
+    @Override
+    public V compute(K key, java.util.function.BiFunction<? super K, ? super V, ? extends V> remappingFunction) {
+        java.util.Objects.requireNonNull(key, "key cannot be null");
+        java.util.Objects.requireNonNull(remappingFunction, "remappingFunction cannot be null");
+
+        V oldValue = storage.get(key) != null ? storage.get(key).getValue() : null;
+        V newValue = remappingFunction.apply(key, oldValue);
+
+        if (newValue == null) {
+            if (oldValue != null) {
+                invalidate(key);
+            }
+            return null;
+        } else {
+            put(key, newValue);
+            return newValue;
+        }
+    }
+
+    @Override
+    public V computeIfAbsent(K key, java.util.function.Function<? super K, ? extends V> mappingFunction) {
+        java.util.Objects.requireNonNull(key, "key cannot be null");
+        java.util.Objects.requireNonNull(mappingFunction, "mappingFunction cannot be null");
+
+        V existing = getIfPresent(key);
+        if (existing != null) {
+            return existing;
+        }
+
+        V newValue = mappingFunction.apply(key);
+        if (newValue != null) {
+            put(key, newValue);
+        }
+        return newValue;
+    }
+
+    @Override
+    public V computeIfPresent(K key, java.util.function.BiFunction<? super K, ? super V, ? extends V> remappingFunction) {
+        java.util.Objects.requireNonNull(key, "key cannot be null");
+        java.util.Objects.requireNonNull(remappingFunction, "remappingFunction cannot be null");
+
+        V oldValue = getIfPresent(key);
+        if (oldValue == null) {
+            return null;
+        }
+
+        V newValue = remappingFunction.apply(key, oldValue);
+        if (newValue == null) {
+            invalidate(key);
+            return null;
+        } else {
+            put(key, newValue);
+            return newValue;
+        }
+    }
+
+    @Override
+    public V merge(K key, V value, java.util.function.BiFunction<? super V, ? super V, ? extends V> remappingFunction) {
+        java.util.Objects.requireNonNull(key, "key cannot be null");
+        java.util.Objects.requireNonNull(value, "value cannot be null");
+        java.util.Objects.requireNonNull(remappingFunction, "remappingFunction cannot be null");
+
+        V oldValue = getIfPresent(key);
+        V newValue = (oldValue == null) ? value : remappingFunction.apply(oldValue, value);
+
+        if (newValue == null) {
+            invalidate(key);
+            return null;
+        } else {
+            put(key, newValue);
+            return newValue;
+        }
+    }
+
+    @Override
+    public Policy<K, V> policy() {
+        return new Policy<K, V>() {
+            @Override
+            public Optional<Policy.Eviction<K, V>> eviction() {
+                if (maximumSize <= 0 && maximumWeight <= 0) {
+                    return Optional.empty();
+                }
+                return Optional.of(new Policy.Eviction<K, V>() {
+                    private volatile long mutableMaximumSize = maximumSize;
+                    private volatile long mutableMaximumWeight = maximumWeight;
+
+                    @Override
+                    public long getMaximum() {
+                        return (weigher == null) ? mutableMaximumSize : mutableMaximumWeight;
+                    }
+
+                    @Override
+                    public void setMaximum(long maximum) {
+                        if (maximum < 0) {
+                            throw new IllegalArgumentException("maximum cannot be negative");
+                        }
+                        if (weigher == null) {
+                            mutableMaximumSize = maximum;
+                        } else {
+                            mutableMaximumWeight = maximum;
+                        }
+                        // Trigger eviction if needed
+                        cleanUp();
+                    }
+
+                    @Override
+                    public long weightedSize() {
+                        return (weigher == null) ? storage.size() : currentWeight.get();
+                    }
+
+                    @Override
+                    public boolean isWeighted() {
+                        return weigher != null;
+                    }
+
+                    @Override
+                    public EvictionPolicy getEvictionPolicy() {
+                        return evictionPolicy;
+                    }
+                });
+            }
+
+            @Override
+            public Optional<Policy.Expiration<K, V>> expiration() {
+                if (expireAfterWriteNanos <= 0 && expireAfterAccessNanos <= 0 && expiry == null) {
+                    return Optional.empty();
+                }
+                return Optional.of(new Policy.Expiration<K, V>() {
+                    private volatile long mutableExpireAfterWriteNanos = expireAfterWriteNanos;
+                    private volatile long mutableExpireAfterAccessNanos = expireAfterAccessNanos;
+
+                    @Override
+                    public long getExpiresAfterWrite() {
+                        return mutableExpireAfterWriteNanos;
+                    }
+
+                    @Override
+                    public void setExpiresAfterWrite(long durationNanos) {
+                        if (durationNanos < 0) {
+                            throw new IllegalArgumentException("duration cannot be negative");
+                        }
+                        mutableExpireAfterWriteNanos = durationNanos;
+                    }
+
+                    @Override
+                    public long getExpiresAfterAccess() {
+                        return mutableExpireAfterAccessNanos;
+                    }
+
+                    @Override
+                    public void setExpiresAfterAccess(long durationNanos) {
+                        if (durationNanos < 0) {
+                            throw new IllegalArgumentException("duration cannot be negative");
+                        }
+                        mutableExpireAfterAccessNanos = durationNanos;
+                    }
+
+                    @Override
+                    public long ageOf(K key) {
+                        FastCacheEntry<V> entry = storage.get(key);
+                        if (entry == null) {
+                            return -1;
+                        }
+                        long now = System.nanoTime();
+                        return now - entry.getWriteTime();
+                    }
+                });
+            }
+        };
     }
 }

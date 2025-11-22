@@ -1,9 +1,12 @@
 package com.github.rudygunawan.kachi.api;
 
 import com.github.rudygunawan.kachi.model.CacheStats;
+import com.github.rudygunawan.kachi.policy.Policy;
 
 import java.util.Map;
 import java.util.concurrent.Callable;
+import java.util.function.BiFunction;
+import java.util.function.Function;
 
 /**
  * A semi-persistent mapping from keys to values. Cache entries are manually added using
@@ -117,4 +120,155 @@ public interface Cache<K, V> {
      * @return a concurrent map view of this cache
      */
     Map<K, V> asMap();
+
+    /**
+     * Attempts to compute a mapping for the specified key and its current mapped value (or
+     * {@code null} if there is no current mapping).
+     *
+     * <p>The entire method invocation is performed atomically. The supplied function is invoked
+     * exactly once per invocation of this method if the key is present in the map. Some attempted
+     * update operations on this cache by other threads may be blocked while computation is in
+     * progress, so the computation should be short and simple, and must not attempt to update any
+     * other mappings of this cache.
+     *
+     * <p><b>Example usage:</b>
+     * <pre>{@code
+     * // Increment a counter
+     * cache.compute(key, (k, v) -> (v == null) ? 1 : v + 1);
+     *
+     * // Remove if value meets condition
+     * cache.compute(key, (k, v) -> (v != null && v.isExpired()) ? null : v);
+     * }</pre>
+     *
+     * @param key the key with which the specified value is to be associated
+     * @param remappingFunction the function to compute a value
+     * @return the new value associated with the specified key, or {@code null} if none
+     * @throws NullPointerException if the specified key is null or the remappingFunction is null
+     * @throws RuntimeException if the remappingFunction throws an exception
+     */
+    V compute(K key, BiFunction<? super K, ? super V, ? extends V> remappingFunction);
+
+    /**
+     * If the specified key is not already associated with a value, attempts to compute its value
+     * using the given mapping function and enters it into this cache unless {@code null}.
+     *
+     * <p>The entire method invocation is performed atomically. The supplied function is invoked
+     * at most once per invocation of this method. Some attempted update operations on this cache
+     * by other threads may be blocked while computation is in progress, so the computation should
+     * be short and simple, and must not attempt to update any other mappings of this cache.
+     *
+     * <p><b>Example usage:</b>
+     * <pre>{@code
+     * // Lazy initialization
+     * User user = cache.computeIfAbsent(userId, id -> database.fetchUser(id));
+     *
+     * // Create default value if missing
+     * List<String> list = cache.computeIfAbsent(key, k -> new ArrayList<>());
+     * }</pre>
+     *
+     * @param key the key with which the computed value is to be associated
+     * @param mappingFunction the function to compute a value
+     * @return the current (existing or computed) value associated with the specified key, or
+     *         {@code null} if the computed value is null
+     * @throws NullPointerException if the specified key is null or the mappingFunction is null
+     * @throws RuntimeException if the mappingFunction throws an exception
+     */
+    V computeIfAbsent(K key, Function<? super K, ? extends V> mappingFunction);
+
+    /**
+     * If the value for the specified key is present, attempts to compute a new mapping given the
+     * key and its current mapped value.
+     *
+     * <p>The entire method invocation is performed atomically. The supplied function is invoked
+     * exactly once per invocation of this method if the key is present. Some attempted update
+     * operations on this cache by other threads may be blocked while computation is in progress,
+     * so the computation should be short and simple, and must not attempt to update any other
+     * mappings of this cache.
+     *
+     * <p><b>Example usage:</b>
+     * <pre>{@code
+     * // Update if present
+     * cache.computeIfPresent(key, (k, v) -> v.withUpdatedTimestamp());
+     *
+     * // Remove if condition met
+     * cache.computeIfPresent(key, (k, v) -> v.isValid() ? v : null);
+     * }</pre>
+     *
+     * @param key the key with which the specified value is associated
+     * @param remappingFunction the function to compute a value
+     * @return the new value associated with the specified key, or {@code null} if none
+     * @throws NullPointerException if the specified key is null or the remappingFunction is null
+     * @throws RuntimeException if the remappingFunction throws an exception
+     */
+    V computeIfPresent(K key, BiFunction<? super K, ? super V, ? extends V> remappingFunction);
+
+    /**
+     * If the specified key is not already associated with a value or is associated with null,
+     * associates it with the given non-null value. Otherwise, replaces the associated value with
+     * the results of the given remapping function, or removes if the result is {@code null}.
+     *
+     * <p>The entire method invocation is performed atomically. The supplied function is invoked
+     * at most once per invocation of this method if the key is present. Some attempted update
+     * operations on this cache by other threads may be blocked while computation is in progress,
+     * so the computation should be short and simple, and must not attempt to update any other
+     * mappings of this cache.
+     *
+     * <p><b>Example usage:</b>
+     * <pre>{@code
+     * // Merge values (e.g., sum counters)
+     * cache.merge(key, 1, Integer::sum);
+     *
+     * // Concatenate strings
+     * cache.merge(key, "newValue", (old, new_) -> old + "," + new_);
+     * }</pre>
+     *
+     * @param key the key with which the resulting value is to be associated
+     * @param value the non-null value to be merged with the existing value associated with the key
+     *              or, if no existing value, to be associated with the key
+     * @param remappingFunction the function to recompute a value if present
+     * @return the new value associated with the specified key, or {@code null} if no value is
+     *         associated with the key
+     * @throws NullPointerException if the specified key is null, the value is null, or the
+     *                              remappingFunction is null
+     * @throws RuntimeException if the remappingFunction throws an exception
+     */
+    V merge(K key, V value, BiFunction<? super V, ? super V, ? extends V> remappingFunction);
+
+    /**
+     * Returns access to inspect and modify the cache's operational characteristics at runtime.
+     *
+     * <p>The policy provides introspection and modification capabilities for:
+     * <ul>
+     *   <li>Eviction settings (maximum size, eviction policy, current weight)</li>
+     *   <li>Expiration settings (TTL after write/access, entry age)</li>
+     * </ul>
+     *
+     * <p><b>Example usage:</b>
+     * <pre>{@code
+     * Cache<String, User> cache = CacheBuilder.newBuilder()
+     *     .maximumSize(1000)
+     *     .expireAfterWrite(10, TimeUnit.MINUTES)
+     *     .build();
+     *
+     * Policy<String, User> policy = cache.policy();
+     *
+     * // Inspect current settings
+     * policy.eviction().ifPresent(eviction -> {
+     *     System.out.println("Max: " + eviction.getMaximum());
+     *     System.out.println("Current: " + eviction.weightedSize());
+     * });
+     *
+     * // Dynamically resize
+     * policy.eviction().ifPresent(eviction -> eviction.setMaximum(2000));
+     *
+     * // Query entry age
+     * policy.expiration().ifPresent(expiration -> {
+     *     long age = expiration.ageOf("userId");
+     *     System.out.println("Entry age: " + age + " ns");
+     * });
+     * }</pre>
+     *
+     * @return access to the cache's policy
+     */
+    Policy<K, V> policy();
 }

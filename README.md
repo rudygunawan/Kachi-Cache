@@ -1,5 +1,7 @@
 # Kachi Cache
 
+> Currently Alpha version (0.1.0). Feel free to try and give feedback!
+
 **Kachi** (カチ) - _pronounced "kah-chee"_
 
 A high-performance Java cache library inspired by Google Guava and Caffeine, with support for TTL (time-to-live), lazy loading, and excellent concurrent performance.
@@ -101,7 +103,7 @@ See [JDK21_FEATURES.md](docs/JDK21_FEATURES.md) for detailed feature breakdown a
 
 ## Requirements
 
-**Java 21 or later** is required. Kachi uses virtual threads and modern Java features for maximum performance.
+**Java 21 or later** is required. Kachi is designed for teams who have already migrated to Java 21 or later and want to leverage its modern features, particularly virtual threads, for optimal caching performance. This complements existing solutions like Caffeine (JDK 11+) and Google Guava Cache (JDK 8+), which provide excellent caching capabilities with broader Java version compatibility. Kachi simply serves a different use case: maximizing performance for projects that can take advantage of Java 21's enhanced concurrency model.
 
 ## Installation
 

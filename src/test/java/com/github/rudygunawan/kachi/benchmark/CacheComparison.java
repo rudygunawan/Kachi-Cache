@@ -428,9 +428,12 @@ public class CacheComparison {
             case "Kachi":
                 loadingCache = CacheBuilder.newBuilder()
                     .maximumSize(CACHE_SIZE)
-                    .build(key -> {
-                        Thread.sleep(loadDelayMs);
-                        return "loaded-" + key;
+                    .build(new com.github.rudygunawan.kachi.api.CacheLoader<Integer, String>() {
+                        @Override
+                        public String load(Integer key) throws Exception {
+                            Thread.sleep(loadDelayMs);
+                            return "loaded-" + key;
+                        }
                     });
                 break;
 

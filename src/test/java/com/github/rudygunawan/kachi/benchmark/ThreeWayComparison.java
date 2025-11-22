@@ -216,7 +216,7 @@ public class ThreeWayComparison {
 
         // Benchmark Guava
         com.google.common.cache.Cache<Integer, String> guavaCache =
-            GuavaCacheBuilder.newBuilder()
+            com.google.common.cache.CacheBuilder.newBuilder()
                 .maximumSize(CACHE_SIZE)
                 .build();
 
@@ -229,7 +229,7 @@ public class ThreeWayComparison {
 
         long guavaTotal = 0;
         for (int iter = 0; iter < ITERATIONS; iter++) {
-            guavaCache = GuavaCacheBuilder.newBuilder()
+            guavaCache = com.google.common.cache.CacheBuilder.newBuilder()
                 .maximumSize(CACHE_SIZE)
                 .build();
             long start = System.nanoTime();
@@ -466,7 +466,7 @@ public class ThreeWayComparison {
 
         // Test Guava
         com.google.common.cache.Cache<Integer, String> guavaCache =
-            GuavaCacheBuilder.newBuilder()
+            com.google.common.cache.CacheBuilder.newBuilder()
                 .maximumSize(CACHE_SIZE)
                 .build();
 

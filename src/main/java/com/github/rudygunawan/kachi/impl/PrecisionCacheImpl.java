@@ -6,6 +6,8 @@ import com.github.rudygunawan.kachi.api.LoadingCache;
 import com.github.rudygunawan.kachi.api.RefreshPolicy;
 import com.github.rudygunawan.kachi.api.Weigher;
 import com.github.rudygunawan.kachi.builder.CacheBuilder;
+import com.github.rudygunawan.kachi.listener.EvictionListener;
+import com.github.rudygunawan.kachi.listener.PutListener;
 import com.github.rudygunawan.kachi.listener.RemovalListener;
 import com.github.rudygunawan.kachi.metrics.CacheMetrics;
 import com.github.rudygunawan.kachi.metrics.ExpiryDistribution;
@@ -13,8 +15,13 @@ import com.github.rudygunawan.kachi.model.CacheEntry;
 import com.github.rudygunawan.kachi.model.CacheStats;
 import com.github.rudygunawan.kachi.policy.EvictionPolicy;
 import com.github.rudygunawan.kachi.policy.FrequencySketch;
+import com.github.rudygunawan.kachi.policy.Policy;
+import com.github.rudygunawan.kachi.policy.PutCause;
 import com.github.rudygunawan.kachi.policy.RemovalCause;
+import com.github.rudygunawan.kachi.policy.Strength;
+import com.github.rudygunawan.kachi.reference.KeyReference;
 
+import java.lang.ref.ReferenceQueue;
 import java.util.*;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicLong;
@@ -23,28 +30,32 @@ import java.util.logging.Level;
 import java.util.logging.Logger;
 
 /**
- * Precision cache implementation optimized for accurate eviction and strong consistency.
+ * Precision cache implementation optimized for accurate eviction and strong
+ * consistency.
  *
- * <p><b>Performance Characteristics:</b>
+ * <p>
+ * <b>Performance Characteristics:</b>
  * <ul>
- *   <li>GET: ~800-1,400ns (still respectable performance)</li>
- *   <li>Concurrent: ~1-2M ops/sec</li>
- *   <li>Per-key locking with write-priority</li>
- *   <li>Accurate LRU/FIFO/LFU/TinyLFU eviction</li>
- *   <li>Immediate expiry checking</li>
+ * <li>GET: ~800-1,400ns (still respectable performance)</li>
+ * <li>Concurrent: ~1-2M ops/sec</li>
+ * <li>Per-key locking with write-priority</li>
+ * <li>Accurate LRU/FIFO/LFU/TinyLFU eviction</li>
+ * <li>Immediate expiry checking</li>
  * </ul>
  *
- * <p><b>Features:</b>
+ * <p>
+ * <b>Features:</b>
  * <ul>
- *   <li>✅ Accurate eviction policies (LRU/FIFO/LFU/TinyLFU)</li>
- *   <li>✅ Strong consistency guarantees</li>
- *   <li>✅ Immediate expiry on every read</li>
- *   <li>✅ Per-entry custom TTL</li>
- *   <li>✅ Write-priority locking</li>
- *   <li>⚠️ Slower than HighPerformanceCache (~12-22x)</li>
+ * <li>✅ Accurate eviction policies (LRU/FIFO/LFU/TinyLFU)</li>
+ * <li>✅ Strong consistency guarantees</li>
+ * <li>✅ Immediate expiry on every read</li>
+ * <li>✅ Per-entry custom TTL</li>
+ * <li>✅ Write-priority locking</li>
+ * <li>⚠️ Slower than HighPerformanceCache (~12-22x)</li>
  * </ul>
  *
- * <p>For maximum speed with random eviction, use {@link HighPerformanceCacheImpl}.
+ * <p>
+ * For maximum speed with random eviction, use {@link HighPerformanceCacheImpl}.
  *
  * @param <K> the type of keys
  * @param <V> the type of values
@@ -52,15 +63,18 @@ import java.util.logging.Logger;
  */
 public class PrecisionCacheImpl<K, V> implements LoadingCache<K, V>, CacheMetrics {
     /**
-     * Logger for cache operations. Logger name: "com.github.rudygunawan.kachi.Cache"
+     * Logger for cache operations. Logger name:
+     * "com.github.rudygunawan.kachi.Cache"
      *
-     * <p>Log levels used:
+     * <p>
+     * Log levels used:
      * <ul>
-     *   <li>SEVERE: Critical errors that prevent cache operations</li>
-     *   <li>WARNING: Errors in custom policies or listeners (operations continue)</li>
-     *   <li>FINE: Detailed cache operations (evictions, refreshes)</li>
-     *   <li>FINER: Entry-level operations (put, get, remove)</li>
-     *   <li>FINEST: Detailed debugging information</li>
+     * <li>SEVERE: Critical errors that prevent cache operations</li>
+     * <li>WARNING: Errors in custom policies or listeners (operations
+     * continue)</li>
+     * <li>FINE: Detailed cache operations (evictions, refreshes)</li>
+     * <li>FINER: Entry-level operations (put, get, remove)</li>
+     * <li>FINEST: Detailed debugging information</li>
      * </ul>
      */
     private static final Logger LOGGER = Logger.getLogger("com.github.rudygunawan.kachi.Cache");
@@ -77,9 +91,19 @@ public class PrecisionCacheImpl<K, V> implements LoadingCache<K, V>, CacheMetric
     private final boolean recordStats;
     private final EvictionPolicy evictionPolicy;
     private final RemovalListener<? super K, ? super V> removalListener;
+    private final PutListener<? super K, ? super V> putListener;
+    private final EvictionListener<? super K, ? super V> evictionListener;
     private final Expiry<? super K, ? super V> expiry;
     private final RefreshPolicy<? super K, ? super V> refreshPolicy;
     private final long refreshAfterWriteNanos;
+
+    // Reference strength for GC-aware caching
+    private final Strength keyStrength;
+    private final Strength valueStrength;
+    private final ReferenceQueue<K> keyReferenceQueue;
+    private final ReferenceQueue<V> valueReferenceQueue;
+    // Track weak key references for GC notification
+    private final ConcurrentHashMap<K, KeyReference<K>> keyReferences;
 
     // Statistics
     private final AtomicLong hitCount = new AtomicLong(0);
@@ -95,9 +119,9 @@ public class PrecisionCacheImpl<K, V> implements LoadingCache<K, V>, CacheMetric
     private final ConcurrentHashMap<K, ReentrantReadWriteLock> keyLocks = new ConcurrentHashMap<>();
 
     // Window TinyLFU segments (only used when evictionPolicy == WINDOW_TINY_LFU)
-    private final ConcurrentLinkedDeque<K> windowQueue;      // 1% of cache - admission window
-    private final ConcurrentLinkedDeque<K> probationQueue;   // 20% of main cache - probation segment
-    private final ConcurrentLinkedDeque<K> protectedQueue;   // 80% of main cache - protected segment
+    private final ConcurrentLinkedDeque<K> windowQueue; // 1% of cache - admission window
+    private final ConcurrentLinkedDeque<K> probationQueue; // 20% of main cache - probation segment
+    private final ConcurrentLinkedDeque<K> protectedQueue; // 80% of main cache - protected segment
     private final FrequencySketch frequencySketch;
     private final int windowMaxSize;
     private final int probationMaxSize;
@@ -142,9 +166,22 @@ public class PrecisionCacheImpl<K, V> implements LoadingCache<K, V>, CacheMetric
         this.recordStats = builder.isRecordingStats();
         this.evictionPolicy = builder.getEvictionPolicy();
         this.removalListener = (RemovalListener<? super K, ? super V>) builder.getRemovalListener();
+        this.putListener = (PutListener<? super K, ? super V>) builder.getPutListener();
+        this.evictionListener = (EvictionListener<? super K, ? super V>) builder.getEvictionListener();
         this.expiry = (Expiry<? super K, ? super V>) builder.getExpiry();
         this.refreshPolicy = (RefreshPolicy<? super K, ? super V>) builder.getRefreshPolicy();
         this.refreshAfterWriteNanos = builder.getRefreshAfterWriteNanos();
+
+        // Initialize reference strength for GC-aware caching
+        this.keyStrength = builder.getKeyStrength();
+        this.valueStrength = builder.getValueStrength();
+        this.keyReferenceQueue = (keyStrength != Strength.STRONG) ? new ReferenceQueue<>() : null;
+        this.valueReferenceQueue = (valueStrength != Strength.STRONG) ? new ReferenceQueue<>() : null;
+
+        // Initialize key reference tracking for weak keys
+        this.keyReferences = (keyStrength != Strength.STRONG)
+                ? new ConcurrentHashMap<>(builder.getInitialCapacity(), 0.75f, builder.getConcurrencyLevel())
+                : null;
 
         // Initialize Window TinyLFU segments if that policy is selected
         if (evictionPolicy == EvictionPolicy.WINDOW_TINY_LFU && maximumSize > 0) {
@@ -176,14 +213,13 @@ public class PrecisionCacheImpl<K, V> implements LoadingCache<K, V>, CacheMetric
         if (expireAfterWriteNanos > 0 || expireAfterAccessNanos > 0 || expiry != null) {
             this.cleanupScheduler = Executors.newSingleThreadScheduledExecutor(r -> {
                 Thread t = Thread.ofVirtual()
-                    .name("kachi-cache-cleanup")
-                    .unstarted(r);
+                        .name("kachi-cache-cleanup")
+                        .unstarted(r);
                 return t;
             });
             this.cleanupTask = cleanupScheduler.scheduleAtFixedRate(
                     this::cleanUp,
-                    1, 1, TimeUnit.MINUTES
-            );
+                    1, 1, TimeUnit.MINUTES);
         } else {
             this.cleanupScheduler = null;
             this.cleanupTask = null;
@@ -194,16 +230,15 @@ public class PrecisionCacheImpl<K, V> implements LoadingCache<K, V>, CacheMetric
         if (loader != null && (refreshPolicy != null || refreshAfterWriteNanos > 0)) {
             this.refreshScheduler = Executors.newSingleThreadScheduledExecutor(r -> {
                 Thread t = Thread.ofVirtual()
-                    .name("kachi-cache-refresh")
-                    .unstarted(r);
+                        .name("kachi-cache-refresh")
+                        .unstarted(r);
                 return t;
             });
             this.refreshTask = refreshScheduler.scheduleAtFixedRate(
                     this::refreshEntries,
                     REFRESH_CHECK_INTERVAL_MS,
                     REFRESH_CHECK_INTERVAL_MS,
-                    TimeUnit.MILLISECONDS
-            );
+                    TimeUnit.MILLISECONDS);
         } else {
             this.refreshScheduler = null;
             this.refreshTask = null;
@@ -220,13 +255,15 @@ public class PrecisionCacheImpl<K, V> implements LoadingCache<K, V>, CacheMetric
         try {
             if (!lock.readLock().tryLock(READ_TIMEOUT_MS, TimeUnit.MILLISECONDS)) {
                 // Timeout waiting for write to complete
-                if (recordStats) missCount.incrementAndGet();
+                if (recordStats)
+                    missCount.incrementAndGet();
                 return null;
             }
             readLockHeld = true;
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
-            if (recordStats) missCount.incrementAndGet();
+            if (recordStats)
+                missCount.incrementAndGet();
             return null;
         }
 
@@ -234,7 +271,8 @@ public class PrecisionCacheImpl<K, V> implements LoadingCache<K, V>, CacheMetric
             CacheEntry<V> entry = storage.get(key);
 
             if (entry == null) {
-                if (recordStats) missCount.incrementAndGet();
+                if (recordStats)
+                    missCount.incrementAndGet();
                 return null;
             }
 
@@ -253,6 +291,7 @@ public class PrecisionCacheImpl<K, V> implements LoadingCache<K, V>, CacheMetric
                         currentWeight.addAndGet(-entry.getWeight());
                         removeFromEvictionQueues(key);
                         fireRemovalEvent(key, entry.getValue(), RemovalCause.EXPIRED);
+                        fireEvictionEvent(key, entry.getValue(), RemovalCause.EXPIRED);
                         if (recordStats) {
                             missCount.incrementAndGet();
                             evictionCount.incrementAndGet();
@@ -272,7 +311,8 @@ public class PrecisionCacheImpl<K, V> implements LoadingCache<K, V>, CacheMetric
             // Update tracking for eviction policy
             updateAccessTracking(key);
 
-            if (recordStats) hitCount.incrementAndGet();
+            if (recordStats)
+                hitCount.incrementAndGet();
             return entry.getValue();
         } finally {
             if (readLockHeld) {
@@ -301,7 +341,8 @@ public class PrecisionCacheImpl<K, V> implements LoadingCache<K, V>, CacheMetric
                 if (expireAfterAccessNanos > 0) {
                     entry.updateAccessTime();
                 }
-                if (recordStats) hitCount.incrementAndGet();
+                if (recordStats)
+                    hitCount.incrementAndGet();
                 return entry.getValue();
             }
 
@@ -459,7 +500,8 @@ public class PrecisionCacheImpl<K, V> implements LoadingCache<K, V>, CacheMetric
                 }
             } else {
                 // Multiple keys - load in parallel for better performance
-                // JDK 21: Using virtual threads for unlimited parallel loads (no thread pool limit!)
+                // JDK 21: Using virtual threads for unlimited parallel loads (no thread pool
+                // limit!)
                 ExecutorService virtualExecutor = Executors.newVirtualThreadPerTaskExecutor();
                 try {
                     List<CompletableFuture<Map.Entry<K, V>>> futures = new ArrayList<>();
@@ -477,8 +519,7 @@ public class PrecisionCacheImpl<K, V> implements LoadingCache<K, V>, CacheMetric
 
                     // Wait for all loads to complete
                     CompletableFuture<Void> allFutures = CompletableFuture.allOf(
-                        futures.toArray(new CompletableFuture[0])
-                    );
+                            futures.toArray(new CompletableFuture[0]));
 
                     try {
                         allFutures.get(); // Wait for completion
@@ -546,9 +587,22 @@ public class PrecisionCacheImpl<K, V> implements LoadingCache<K, V>, CacheMetric
 
         // Calculate weight for this entry
         int weight = calculateWeight(key, value);
-        CacheEntry<V> newEntry = new CacheEntry<>(value, ttl, weight);
+        CacheEntry<V> newEntry = new CacheEntry<>(value, ttl, weight, valueStrength, valueReferenceQueue);
 
         oldEntry = storage.put(key, newEntry);
+
+        // Track weak key reference if using weak keys
+        if (keyReferences != null && oldEntry == null) {
+            // Only create reference for new entries (not replacements)
+            KeyReference<K> keyRef = KeyReference.create(key, keyStrength, keyReferenceQueue);
+            keyReferences.put(key, keyRef);
+        }
+
+        // Fire put event (before removal event to allow listeners to know about the new
+        // value first)
+        PutCause putCause = (oldEntry != null) ? PutCause.UPDATE : PutCause.INSERT;
+        firePutEvent(key, value, putCause);
+
         if (oldEntry != null) {
             // Subtract old entry weight and add new entry weight
             currentWeight.addAndGet(weight - oldEntry.getWeight());
@@ -603,6 +657,11 @@ public class PrecisionCacheImpl<K, V> implements LoadingCache<K, V>, CacheMetric
         try {
             CacheEntry<V> removed = storage.remove(key);
             if (removed != null) {
+                // Remove key reference if using weak keys
+                if (keyReferences != null) {
+                    keyReferences.remove(key);
+                }
+
                 // Subtract the removed entry's weight
                 currentWeight.addAndGet(-removed.getWeight());
                 removeFromEvictionQueues(key);
@@ -645,8 +704,7 @@ public class PrecisionCacheImpl<K, V> implements LoadingCache<K, V>, CacheMetric
                 loadSuccessCount.get(),
                 loadFailureCount.get(),
                 totalLoadTime.get(),
-                evictionCount.get()
-        );
+                evictionCount.get());
     }
 
     @Override
@@ -654,26 +712,118 @@ public class PrecisionCacheImpl<K, V> implements LoadingCache<K, V>, CacheMetric
         long now = System.nanoTime();
         List<K> keysToRemove = new ArrayList<>();
 
-        // Find expired entries
+        // Find expired entries and entries with GC'd values
         for (Map.Entry<K, CacheEntry<V>> entry : storage.entrySet()) {
-            if (isExpired(entry.getValue())) {
+            CacheEntry<V> cacheEntry = entry.getValue();
+            if (isExpired(cacheEntry) || cacheEntry.isValueCleared()) {
                 keysToRemove.add(entry.getKey());
             }
         }
 
-        // Remove expired entries
+        // Remove expired entries and GC'd values
         for (K key : keysToRemove) {
             ReentrantReadWriteLock lock = getOrCreateLock(key);
             lock.writeLock().lock();
             try {
                 CacheEntry<V> entry = storage.get(key);
-                if (entry != null && isExpired(entry)) {
-                    storage.remove(key);
-                    // Subtract the expired entry's weight
-                    currentWeight.addAndGet(-entry.getWeight());
+                if (entry != null) {
+                    boolean isExpired = isExpired(entry);
+                    boolean isCleared = entry.isValueCleared();
+
+                    if (isExpired || isCleared) {
+                        storage.remove(key);
+                        // Subtract the entry's weight
+                        currentWeight.addAndGet(-entry.getWeight());
+                        removeFromEvictionQueues(key);
+
+                        // Get value before it might be fully cleared (may be null if GC'd)
+                        V value = entry.getValue();
+
+                        if (isExpired) {
+                            fireRemovalEvent(key, value, RemovalCause.EXPIRED);
+                            fireEvictionEvent(key, value, RemovalCause.EXPIRED);
+                        } else {
+                            // Value was GC'd - treat as explicit removal
+                            fireRemovalEvent(key, value, RemovalCause.EXPLICIT);
+                        }
+
+                        if (recordStats)
+                            evictionCount.incrementAndGet();
+                    }
+                }
+            } finally {
+                lock.writeLock().unlock();
+            }
+        }
+
+        // Poll reference queue for GC'd values (non-blocking)
+        if (valueReferenceQueue != null) {
+            cleanUpGarbageCollectedValues();
+        }
+
+        // Poll reference queue for GC'd keys (non-blocking)
+        if (keyReferenceQueue != null) {
+            cleanUpGarbageCollectedKeys();
+        }
+    }
+
+    /**
+     * Cleans up entries whose values have been garbage collected.
+     * This method polls the reference queue and removes entries with cleared value
+     * references.
+     */
+    private void cleanUpGarbageCollectedValues() {
+        // Poll all cleared references from the queue (non-blocking)
+        // Note: We can't easily map from ValueReference back to key, so we rely on
+        // the periodic scan in cleanUp() to find and remove entries with cleared values
+        while (valueReferenceQueue.poll() != null) {
+            // Reference has been cleared by GC
+            // The actual entry removal happens in the main cleanUp() scan above
+        }
+    }
+
+    /**
+     * Cleans up entries whose keys have been garbage collected.
+     * This method scans the key references map for cleared references and removes
+     * the corresponding entries.
+     */
+    private void cleanUpGarbageCollectedKeys() {
+        if (keyReferences == null)
+            return;
+
+        // Poll the reference queue (non-blocking)
+        while (keyReferenceQueue.poll() != null) {
+            // A key was GC'd - we'll find it in the scan below
+        }
+
+        // Scan key references for cleared references
+        List<K> keysToRemove = new ArrayList<>();
+        for (Map.Entry<K, KeyReference<K>> entry : keyReferences.entrySet()) {
+            if (entry.getValue().isCleared()) {
+                keysToRemove.add(entry.getKey());
+            }
+        }
+
+        // Remove entries with GC'd keys
+        for (K key : keysToRemove) {
+            ReentrantReadWriteLock lock = getOrCreateLock(key);
+            lock.writeLock().lock();
+            try {
+                CacheEntry<V> removed = storage.remove(key);
+                keyReferences.remove(key);
+
+                if (removed != null) {
+                    currentWeight.addAndGet(-removed.getWeight());
                     removeFromEvictionQueues(key);
-                    fireRemovalEvent(key, entry.getValue(), RemovalCause.EXPIRED);
-                    if (recordStats) evictionCount.incrementAndGet();
+
+                    // Get value (may be null if also GC'd)
+                    V value = removed.getValue();
+
+                    // Key was GC'd - treat as explicit removal
+                    fireRemovalEvent(key, value, RemovalCause.EXPLICIT);
+
+                    if (recordStats)
+                        evictionCount.incrementAndGet();
                 }
             } finally {
                 lock.writeLock().unlock();
@@ -713,8 +863,8 @@ public class PrecisionCacheImpl<K, V> implements LoadingCache<K, V>, CacheMetric
      * Gets the TTL for an entry. If custom expiry is configured, it is used.
      * Otherwise, falls back to the fixed expireAfterWrite TTL.
      *
-     * @param key the key being stored
-     * @param value the value being stored
+     * @param key      the key being stored
+     * @param value    the value being stored
      * @param oldEntry the old entry if this is an update, null if this is a create
      * @return the TTL in nanoseconds, or 0 for no expiration
      */
@@ -735,7 +885,7 @@ public class PrecisionCacheImpl<K, V> implements LoadingCache<K, V>, CacheMetric
             } catch (Exception e) {
                 // If custom expiry throws an exception, log and fall back to default
                 LOGGER.log(Level.WARNING, "Error in custom expiry policy for key: " + key +
-                          ", falling back to default TTL", e);
+                        ", falling back to default TTL", e);
             }
         }
 
@@ -747,9 +897,10 @@ public class PrecisionCacheImpl<K, V> implements LoadingCache<K, V>, CacheMetric
     }
 
     /**
-     * Calculates the weight of an entry using the weigher if configured, or returns 1.
+     * Calculates the weight of an entry using the weigher if configured, or returns
+     * 1.
      *
-     * @param key the key being stored
+     * @param key   the key being stored
      * @param value the value being stored
      * @return the weight of the entry (minimum 1)
      */
@@ -762,7 +913,7 @@ public class PrecisionCacheImpl<K, V> implements LoadingCache<K, V>, CacheMetric
             } catch (Exception e) {
                 // If weigher throws exception, log and fall back to weight of 1
                 LOGGER.log(Level.WARNING, "Error in weigher for key: " + key +
-                          ", falling back to weight of 1", e);
+                        ", falling back to weight of 1", e);
                 return 1;
             }
         }
@@ -843,7 +994,7 @@ public class PrecisionCacheImpl<K, V> implements LoadingCache<K, V>, CacheMetric
         int failedAttempts = 0;
         int maxFailedAttempts = 10; // Prevent infinite loops
         while ((maximumSize > 0 && storage.size() > maximumSize) ||
-               (maximumWeight > 0 && currentWeight.get() > maximumWeight)) {
+                (maximumWeight > 0 && currentWeight.get() > maximumWeight)) {
             K keyToEvict = selectKeyToEvict();
             if (keyToEvict == null) {
                 break;
@@ -858,11 +1009,13 @@ public class PrecisionCacheImpl<K, V> implements LoadingCache<K, V>, CacheMetric
                         currentWeight.addAndGet(-removed.getWeight());
                         removeFromEvictionQueues(keyToEvict);
                         fireRemovalEvent(keyToEvict, removed.getValue(), RemovalCause.SIZE);
-                        if (recordStats) evictionCount.incrementAndGet();
+                        fireEvictionEvent(keyToEvict, removed.getValue(), RemovalCause.SIZE);
+                        if (recordStats)
+                            evictionCount.incrementAndGet();
                         if (LOGGER.isLoggable(Level.FINE)) {
                             LOGGER.fine("Evicted entry due to size/weight limit: key=" + keyToEvict +
-                                       ", policy=" + evictionPolicy + ", size=" + storage.size() +
-                                       ", weight=" + currentWeight.get());
+                                    ", policy=" + evictionPolicy + ", size=" + storage.size() +
+                                    ", weight=" + currentWeight.get());
                         }
                         failedAttempts = 0; // Reset on successful eviction
                     }
@@ -1018,7 +1171,52 @@ public class PrecisionCacheImpl<K, V> implements LoadingCache<K, V>, CacheMetric
             } catch (Exception e) {
                 // Log and swallow exceptions from listener
                 LOGGER.log(Level.WARNING, "RemovalListener threw exception for key: " + key +
-                          ", cause: " + cause, e);
+                        ", cause: " + cause, e);
+            }
+        }
+    }
+
+    /**
+     * Fires a put event to the configured put listener.
+     * Exceptions thrown by the listener are logged and swallowed to prevent cache
+     * operation failures.
+     *
+     * @param key   the key that was put
+     * @param value the value that was put
+     * @param cause the reason for the put (INSERT for new entries, UPDATE for
+     *              replacements)
+     */
+    private void firePutEvent(K key, V value, PutCause cause) {
+        if (putListener != null) {
+            try {
+                putListener.onPut(key, value, cause);
+            } catch (Exception e) {
+                // Log and swallow exceptions from listener
+                LOGGER.log(Level.WARNING, "PutListener threw exception for key: " + key +
+                        ", cause: " + cause, e);
+            }
+        }
+    }
+
+    /**
+     * Fires an eviction event to the configured eviction listener.
+     * Eviction events are only fired for SIZE and EXPIRED removals (not EXPLICIT or
+     * REPLACED).
+     * Exceptions thrown by the listener are logged and swallowed to prevent cache
+     * operation failures.
+     *
+     * @param key   the key that was evicted
+     * @param value the value that was evicted
+     * @param cause the reason for eviction (SIZE or EXPIRED only)
+     */
+    private void fireEvictionEvent(K key, V value, RemovalCause cause) {
+        if (evictionListener != null && cause.wasEvicted()) {
+            try {
+                evictionListener.onEviction(key, value, cause);
+            } catch (Exception e) {
+                // Log and swallow exceptions from listener
+                LOGGER.log(Level.WARNING, "EvictionListener threw exception for key: " + key +
+                        ", cause: " + cause, e);
             }
         }
     }
@@ -1027,7 +1225,8 @@ public class PrecisionCacheImpl<K, V> implements LoadingCache<K, V>, CacheMetric
      * Shutdown the cleanup scheduler when cache is no longer needed.
      */
     /**
-     * Background task that checks all entries and refreshes those that need refreshing.
+     * Background task that checks all entries and refreshes those that need
+     * refreshing.
      * This runs periodically based on REFRESH_CHECK_INTERVAL_MS.
      */
     private void refreshEntries() {
@@ -1050,7 +1249,8 @@ public class PrecisionCacheImpl<K, V> implements LoadingCache<K, V>, CacheMetric
     }
 
     /**
-     * Determines if an entry should be refreshed based on the refresh policy or fixed interval.
+     * Determines if an entry should be refreshed based on the refresh policy or
+     * fixed interval.
      */
     private boolean shouldRefresh(K key, CacheEntry<V> entry, long currentTime) {
         long lastRefresh = entry.getLastRefreshTime();
@@ -1064,7 +1264,7 @@ public class PrecisionCacheImpl<K, V> implements LoadingCache<K, V>, CacheMetric
             } catch (Exception e) {
                 // If policy throws exception, fall through to fixed interval
                 LOGGER.log(Level.WARNING, "Error in refresh policy for key: " + key +
-                          ", falling back to fixed refresh interval", e);
+                        ", falling back to fixed refresh interval", e);
             }
         }
 
@@ -1100,7 +1300,9 @@ public class PrecisionCacheImpl<K, V> implements LoadingCache<K, V>, CacheMetric
                     if (currentEntry != null && currentEntry.getLastRefreshTime() == oldEntry.getLastRefreshTime()) {
                         // Update with new entry
                         long ttl = getTtlForEntry(key, newValue, currentEntry);
-                        CacheEntry<V> newEntry = new CacheEntry<>(newValue, ttl);
+                        int weight = calculateWeight(key, newValue);
+                        CacheEntry<V> newEntry = new CacheEntry<>(newValue, ttl, weight, valueStrength,
+                                valueReferenceQueue);
                         newEntry.updateLastRefreshTime();
                         storage.put(key, newEntry);
 
@@ -1125,7 +1327,7 @@ public class PrecisionCacheImpl<K, V> implements LoadingCache<K, V>, CacheMetric
             // Refresh failed - keep old value
             if (LOGGER.isLoggable(Level.FINE)) {
                 LOGGER.log(Level.FINE, "Failed to refresh entry in background: key=" + key +
-                          ", keeping old value", e);
+                        ", keeping old value", e);
             }
             if (refreshPolicy != null) {
                 try {
@@ -1274,7 +1476,178 @@ public class PrecisionCacheImpl<K, V> implements LoadingCache<K, V>, CacheMetric
                 lessThan1Hour,
                 lessThan24Hours,
                 moreThan24Hours,
-                neverExpires
-        );
+                neverExpires);
+    }
+
+    @Override
+    public V compute(K key, java.util.function.BiFunction<? super K, ? super V, ? extends V> remappingFunction) {
+        java.util.Objects.requireNonNull(key, "key cannot be null");
+        java.util.Objects.requireNonNull(remappingFunction, "remappingFunction cannot be null");
+
+        V oldValue = storage.get(key) != null ? storage.get(key).getValue() : null;
+        V newValue = remappingFunction.apply(key, oldValue);
+
+        if (newValue == null) {
+            if (oldValue != null) {
+                invalidate(key);
+            }
+            return null;
+        } else {
+            put(key, newValue);
+            return newValue;
+        }
+    }
+
+    @Override
+    public V computeIfAbsent(K key, java.util.function.Function<? super K, ? extends V> mappingFunction) {
+        java.util.Objects.requireNonNull(key, "key cannot be null");
+        java.util.Objects.requireNonNull(mappingFunction, "mappingFunction cannot be null");
+
+        V existing = getIfPresent(key);
+        if (existing != null) {
+            return existing;
+        }
+
+        V newValue = mappingFunction.apply(key);
+        if (newValue != null) {
+            put(key, newValue);
+        }
+        return newValue;
+    }
+
+    @Override
+    public V computeIfPresent(K key,
+            java.util.function.BiFunction<? super K, ? super V, ? extends V> remappingFunction) {
+        java.util.Objects.requireNonNull(key, "key cannot be null");
+        java.util.Objects.requireNonNull(remappingFunction, "remappingFunction cannot be null");
+
+        V oldValue = getIfPresent(key);
+        if (oldValue == null) {
+            return null;
+        }
+
+        V newValue = remappingFunction.apply(key, oldValue);
+        if (newValue == null) {
+            invalidate(key);
+            return null;
+        } else {
+            put(key, newValue);
+            return newValue;
+        }
+    }
+
+    @Override
+    public V merge(K key, V value, java.util.function.BiFunction<? super V, ? super V, ? extends V> remappingFunction) {
+        java.util.Objects.requireNonNull(key, "key cannot be null");
+        java.util.Objects.requireNonNull(value, "value cannot be null");
+        java.util.Objects.requireNonNull(remappingFunction, "remappingFunction cannot be null");
+
+        V oldValue = getIfPresent(key);
+        V newValue = (oldValue == null) ? value : remappingFunction.apply(oldValue, value);
+
+        if (newValue == null) {
+            invalidate(key);
+            return null;
+        } else {
+            put(key, newValue);
+            return newValue;
+        }
+    }
+
+    @Override
+    public Policy<K, V> policy() {
+        return new Policy<K, V>() {
+            @Override
+            public Optional<Policy.Eviction<K, V>> eviction() {
+                if (maximumSize <= 0 && maximumWeight <= 0) {
+                    return Optional.empty();
+                }
+                return Optional.of(new Policy.Eviction<K, V>() {
+                    private volatile long mutableMaximumSize = maximumSize;
+                    private volatile long mutableMaximumWeight = maximumWeight;
+
+                    @Override
+                    public long getMaximum() {
+                        return (weigher == null) ? mutableMaximumSize : mutableMaximumWeight;
+                    }
+
+                    @Override
+                    public void setMaximum(long maximum) {
+                        if (maximum < 0) {
+                            throw new IllegalArgumentException("maximum cannot be negative");
+                        }
+                        if (weigher == null) {
+                            mutableMaximumSize = maximum;
+                        } else {
+                            mutableMaximumWeight = maximum;
+                        }
+                        // Trigger eviction if needed
+                        cleanUp();
+                    }
+
+                    @Override
+                    public long weightedSize() {
+                        return (weigher == null) ? storage.size() : currentWeight.get();
+                    }
+
+                    @Override
+                    public boolean isWeighted() {
+                        return weigher != null;
+                    }
+
+                    @Override
+                    public EvictionPolicy getEvictionPolicy() {
+                        return evictionPolicy;
+                    }
+                });
+            }
+
+            @Override
+            public Optional<Policy.Expiration<K, V>> expiration() {
+                if (expireAfterWriteNanos <= 0 && expireAfterAccessNanos <= 0 && expiry == null) {
+                    return Optional.empty();
+                }
+                return Optional.of(new Policy.Expiration<K, V>() {
+                    private volatile long mutableExpireAfterWriteNanos = expireAfterWriteNanos;
+                    private volatile long mutableExpireAfterAccessNanos = expireAfterAccessNanos;
+
+                    @Override
+                    public long getExpiresAfterWrite() {
+                        return mutableExpireAfterWriteNanos;
+                    }
+
+                    @Override
+                    public void setExpiresAfterWrite(long durationNanos) {
+                        if (durationNanos < 0) {
+                            throw new IllegalArgumentException("duration cannot be negative");
+                        }
+                        mutableExpireAfterWriteNanos = durationNanos;
+                    }
+
+                    @Override
+                    public long getExpiresAfterAccess() {
+                        return mutableExpireAfterAccessNanos;
+                    }
+
+                    @Override
+                    public void setExpiresAfterAccess(long durationNanos) {
+                        if (durationNanos < 0) {
+                            throw new IllegalArgumentException("duration cannot be negative");
+                        }
+                        mutableExpireAfterAccessNanos = durationNanos;
+                    }
+
+                    @Override
+                    public long ageOf(K key) {
+                        CacheEntry<V> entry = storage.get(key);
+                        if (entry == null) {
+                            return -1;
+                        }
+                        long now = System.nanoTime();
+                        return now - entry.getWriteTime();
+                    }
+                });
+            }
+        };
     }
 }
