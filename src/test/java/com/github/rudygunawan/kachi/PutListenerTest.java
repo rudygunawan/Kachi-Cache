@@ -242,16 +242,16 @@ class PutListenerTest {
         AtomicInteger updateOps = new AtomicInteger(0);
         ExecutorService dbExecutor = Executors.newFixedThreadPool(4);
 
-        Cache<String, String> cache = CacheBuilder.newBuilder()
+        Cache<String, String> cache = CacheBuilder.<String, String>newBuilder()
                 .maximumSize(100)
-                .putListener((key, value, cause) -> {
+                .<String, String>putListener((key, value, cause) -> {
                     // Async database upsert
                     dbExecutor.submit(() -> {
                         if (cause == PutCause.INSERT) {
-                            database.put(key, value);
+                            database.put((String)key, (String)value);
                             insertOps.incrementAndGet();
                         } else {
-                            database.put(key, value);
+                            database.put((String)key, (String)value);
                             updateOps.incrementAndGet();
                         }
                     });
@@ -320,10 +320,10 @@ class PutListenerTest {
         List<String> keys = new ArrayList<>();
         List<Integer> values = new ArrayList<>();
 
-        Cache<String, Integer> cache = CacheBuilder.newBuilder()
-                .putListener((key, value, cause) -> {
-                    keys.add(key);
-                    values.add(value);
+        Cache<String, Integer> cache = CacheBuilder.<String, Integer>newBuilder()
+                .<String, Integer>putListener((key, value, cause) -> {
+                    keys.add((String)key);
+                    values.add((Integer)value);
                 })
                 .build();
 

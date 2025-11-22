@@ -1,7 +1,9 @@
 package com.github.rudygunawan.kachi;
 
+import com.github.rudygunawan.kachi.api.Cache;
+import com.github.rudygunawan.kachi.api.CacheLoader;
 import com.github.rudygunawan.kachi.builder.CacheBuilder;
-import com.github.rudygunawan.kachi.impl.ConcurrentCacheImpl;
+import com.github.rudygunawan.kachi.metrics.CacheMetrics;
 import com.github.rudygunawan.kachi.metrics.MicrometerCacheMetrics;
 
 import io.micrometer.core.instrument.*;
@@ -17,16 +19,27 @@ import static org.junit.jupiter.api.Assertions.*;
  */
 class MicrometerMetricsTest {
 
+    /**
+     * Helper method to cast cache to a type that works with MicrometerCacheMetrics.monitor().
+     * The actual implementations (HighPerformanceCacheImpl/PrecisionCacheImpl) implement both
+     * Cache and CacheMetrics, but the build() method only returns Cache<K,V>.
+     */
+    @SuppressWarnings("unchecked")
+    private static <K, V, C extends Cache<K, V> & CacheMetrics> C asMonitorable(Cache<K, V> cache) {
+        // This is safe because both HighPerformanceCacheImpl and PrecisionCacheImpl implement CacheMetrics
+        return (C) cache;
+    }
+
     @Test
     void testBasicMetricsExposed() {
         MeterRegistry registry = new SimpleMeterRegistry();
 
-        ConcurrentCacheImpl<String, String> cache = (ConcurrentCacheImpl<String, String>)
+        var cache =
                 CacheBuilder.newBuilder()
                         .recordStats()
                         .build();
 
-        MicrometerCacheMetrics.monitor(registry, cache, "testCache");
+        MicrometerCacheMetrics.monitor(registry, asMonitorable(cache), "testCache");
 
         // Verify metrics are registered
         assertNotNull(registry.find("cache.size").gauge());
@@ -39,12 +52,12 @@ class MicrometerMetricsTest {
     void testCacheSizeMetric() {
         MeterRegistry registry = new SimpleMeterRegistry();
 
-        ConcurrentCacheImpl<String, String> cache = (ConcurrentCacheImpl<String, String>)
+        var cache =
                 CacheBuilder.newBuilder()
                         .recordStats()
                         .build();
 
-        MicrometerCacheMetrics.monitor(registry, cache, "testCache");
+        MicrometerCacheMetrics.monitor(registry, asMonitorable(cache), "testCache");
 
         Gauge sizeGauge = registry.find("cache.size").gauge();
         assertNotNull(sizeGauge);
@@ -60,12 +73,12 @@ class MicrometerMetricsTest {
     void testHitAndMissMetrics() {
         MeterRegistry registry = new SimpleMeterRegistry();
 
-        ConcurrentCacheImpl<String, String> cache = (ConcurrentCacheImpl<String, String>)
+        var cache =
                 CacheBuilder.newBuilder()
                         .recordStats()
                         .build();
 
-        MicrometerCacheMetrics.monitor(registry, cache, "testCache");
+        MicrometerCacheMetrics.monitor(registry, asMonitorable(cache), "testCache");
 
         Counter hits = registry.find("cache.hits").counter();
         Counter misses = registry.find("cache.misses").counter();
@@ -93,13 +106,13 @@ class MicrometerMetricsTest {
     void testEvictionMetrics() {
         MeterRegistry registry = new SimpleMeterRegistry();
 
-        ConcurrentCacheImpl<Integer, String> cache = (ConcurrentCacheImpl<Integer, String>)
+        var cache =
                 CacheBuilder.newBuilder()
                         .maximumSize(2)
                         .recordStats()
                         .build();
 
-        MicrometerCacheMetrics.monitor(registry, cache, "testCache");
+        MicrometerCacheMetrics.monitor(registry, asMonitorable(cache), "testCache");
 
         Counter evictions = registry.find("cache.evictions").counter();
         assertNotNull(evictions);
@@ -127,12 +140,12 @@ class MicrometerMetricsTest {
             }
         };
 
-        ConcurrentCacheImpl<String, String> cache = (ConcurrentCacheImpl<String, String>)
+        var cache =
                 CacheBuilder.newBuilder()
                         .recordStats()
                         .build(loader);
 
-        MicrometerCacheMetrics.monitor(registry, cache, "testCache");
+        MicrometerCacheMetrics.monitor(registry, asMonitorable(cache), "testCache");
 
         Counter loadSuccess = registry.find("cache.loads").tag("result", "success").counter();
         Counter loadFailure = registry.find("cache.loads").tag("result", "failure").counter();
@@ -154,12 +167,12 @@ class MicrometerMetricsTest {
     void testHitRatioMetric() {
         MeterRegistry registry = new SimpleMeterRegistry();
 
-        ConcurrentCacheImpl<String, String> cache = (ConcurrentCacheImpl<String, String>)
+        var cache =
                 CacheBuilder.newBuilder()
                         .recordStats()
                         .build();
 
-        MicrometerCacheMetrics.monitor(registry, cache, "testCache");
+        MicrometerCacheMetrics.monitor(registry, asMonitorable(cache), "testCache");
 
         Gauge hitRatio = registry.find("cache.hit.ratio").gauge();
         assertNotNull(hitRatio);
@@ -186,12 +199,12 @@ class MicrometerMetricsTest {
     void testIdleEntriesMetric() throws Exception {
         MeterRegistry registry = new SimpleMeterRegistry();
 
-        ConcurrentCacheImpl<String, String> cache = (ConcurrentCacheImpl<String, String>)
+        var cache =
                 CacheBuilder.newBuilder()
                         .recordStats()
                         .build();
 
-        MicrometerCacheMetrics.monitor(registry, cache, "testCache");
+        MicrometerCacheMetrics.monitor(registry, asMonitorable(cache), "testCache");
 
         Gauge idleEntries = registry.find("cache.idle.entries").gauge();
         assertNotNull(idleEntries);
@@ -214,12 +227,12 @@ class MicrometerMetricsTest {
     void testEstimatedMemoryMetric() {
         MeterRegistry registry = new SimpleMeterRegistry();
 
-        ConcurrentCacheImpl<String, String> cache = (ConcurrentCacheImpl<String, String>)
+        var cache =
                 CacheBuilder.newBuilder()
                         .recordStats()
                         .build();
 
-        MicrometerCacheMetrics.monitor(registry, cache, "testCache");
+        MicrometerCacheMetrics.monitor(registry, asMonitorable(cache), "testCache");
 
         Gauge memory = registry.find("cache.memory.estimated").gauge();
         assertNotNull(memory);
@@ -239,13 +252,13 @@ class MicrometerMetricsTest {
     void testMetricsWithCustomTags() {
         MeterRegistry registry = new SimpleMeterRegistry();
 
-        ConcurrentCacheImpl<String, String> cache = (ConcurrentCacheImpl<String, String>)
+        var cache =
                 CacheBuilder.newBuilder()
                         .recordStats()
                         .build();
 
         Tags customTags = Tags.of("application", "myapp", "environment", "test");
-        MicrometerCacheMetrics.monitor(registry, cache, "userCache", customTags);
+        MicrometerCacheMetrics.monitor(registry, asMonitorable(cache), "userCache", customTags);
 
         Gauge sizeGauge = registry.find("cache.size")
                 .tag("cache", "userCache")
@@ -268,12 +281,11 @@ class MicrometerMetricsTest {
             }
         };
 
-        ConcurrentCacheImpl<String, String> cache = (ConcurrentCacheImpl<String, String>)
-                CacheBuilder.newBuilder()
-                        .recordStats()
-                        .build(loader);
+        var cache = CacheBuilder.newBuilder()
+                .recordStats()
+                .build(loader);
 
-        MicrometerCacheMetrics.monitor(registry, cache, "testCache");
+        MicrometerCacheMetrics.monitor(registry, asMonitorable(cache), "testCache");
 
         FunctionTimer timer = registry.find("cache.load.duration").functionTimer();
         assertNotNull(timer);
@@ -292,13 +304,13 @@ class MicrometerMetricsTest {
 
     @Test
     void testCacheMetricsInterface() {
-        ConcurrentCacheImpl<String, String> cache = (ConcurrentCacheImpl<String, String>)
+        var cache =
                 CacheBuilder.newBuilder()
                         .recordStats()
                         .build();
 
         // Verify CacheMetrics interface is implemented
-        CacheMetrics metrics = cache;
+        CacheMetrics metrics = (CacheMetrics) cache;
 
         assertEquals(0, metrics.size());
         assertEquals(0, metrics.hitCount());
@@ -315,14 +327,11 @@ class MicrometerMetricsTest {
     void testMultipleCachesWithSameRegistry() {
         MeterRegistry registry = new SimpleMeterRegistry();
 
-        ConcurrentCacheImpl<String, String> cache1 = (ConcurrentCacheImpl<String, String>)
-                CacheBuilder.newBuilder().recordStats().build();
+        var cache1 = CacheBuilder.newBuilder().recordStats().build();
+        var cache2 = CacheBuilder.newBuilder().recordStats().build();
 
-        ConcurrentCacheImpl<String, String> cache2 = (ConcurrentCacheImpl<String, String>)
-                CacheBuilder.newBuilder().recordStats().build();
-
-        MicrometerCacheMetrics.monitor(registry, cache1, "cache1");
-        MicrometerCacheMetrics.monitor(registry, cache2, "cache2");
+        MicrometerCacheMetrics.monitor(registry, asMonitorable(cache1), "cache1");
+        MicrometerCacheMetrics.monitor(registry, asMonitorable(cache2), "cache2");
 
         cache1.put("key", "value");
         cache2.put("key1", "value1");

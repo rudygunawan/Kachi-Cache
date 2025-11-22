@@ -172,14 +172,14 @@ class CacheWriterAndExecutorTest {
         ConcurrentHashMap<String, String> database = new ConcurrentHashMap<>();
         AtomicInteger writeCount = new AtomicInteger(0);
 
-        Cache<String, String> cache = CacheBuilder.newBuilder()
+        Cache<String, String> cache = CacheBuilder.<String, String>newBuilder()
                 .maximumSize(100)
                 .writer(CacheWriter.sync(
                         (key, value) -> {
-                            database.put(key, value);
+                            database.put((String)key, (String)value);
                             writeCount.incrementAndGet();
                         },
-                        (key, value, cause) -> database.remove(key)
+                        (key, value, cause) -> database.remove((String)key)
                 ))
                 .build();
 
@@ -252,14 +252,14 @@ class CacheWriterAndExecutorTest {
         AtomicInteger writerCalls = new AtomicInteger(0);
         AtomicInteger listenerCalls = new AtomicInteger(0);
 
-        Cache<String, String> cache = CacheBuilder.newBuilder()
+        Cache<String, String> cache = CacheBuilder.<String, String>newBuilder()
                 .maximumSize(100)
                 .writer(CacheWriter.sync(
                         (key, value) -> {
-                            database.put(key, value);
+                            database.put((String)key, (String)value);
                             writerCalls.incrementAndGet();
                         },
-                        (key, value, cause) -> database.remove(key)
+                        (key, value, cause) -> database.remove((String)key)
                 ))
                 .putListener((key, value, cause) -> listenerCalls.incrementAndGet())
                 .build();
@@ -277,13 +277,13 @@ class CacheWriterAndExecutorTest {
         // Simulates write-through cache pattern
         ConcurrentHashMap<String, String> database = new ConcurrentHashMap<>();
 
-        Cache<String, String> cache = CacheBuilder.newBuilder()
+        Cache<String, String> cache = CacheBuilder.<String, String>newBuilder()
                 .maximumSize(10)
                 .writer(CacheWriter.sync(
-                        (key, value) -> database.put(key, value),
+                        (key, value) -> database.put((String)key, (String)value),
                         (key, value, cause) -> {
                             if (cause == RemovalCause.EXPLICIT) {
-                                database.remove(key);
+                                database.remove((String)key);
                             }
                             // Don't delete from database on eviction
                         }

@@ -1,5 +1,7 @@
 package com.github.rudygunawan.kachi.api;
 
+import com.github.rudygunawan.kachi.model.CacheStats;
+
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentMap;

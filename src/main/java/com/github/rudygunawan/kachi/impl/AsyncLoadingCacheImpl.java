@@ -35,7 +35,7 @@ public class AsyncLoadingCacheImpl<K, V> extends AsyncCacheImpl<K, V> implements
     private static final Logger LOGGER = Logger.getLogger("com.github.rudygunawan.kachi.AsyncCache");
 
     private final LoadingCache<K, V> loadingCache;
-    private final AsyncCacheLoader<K, V> asyncLoader;
+    private final AsyncCacheLoader<? super K, V> asyncLoader;
     private final Executor executor;
 
     /**
@@ -44,7 +44,7 @@ public class AsyncLoadingCacheImpl<K, V> extends AsyncCacheImpl<K, V> implements
      * @param loadingCache the synchronous loading cache to wrap
      * @param asyncLoader the async loader for computing values
      */
-    public AsyncLoadingCacheImpl(LoadingCache<K, V> loadingCache, AsyncCacheLoader<K, V> asyncLoader) {
+    public AsyncLoadingCacheImpl(LoadingCache<K, V> loadingCache, AsyncCacheLoader<? super K, V> asyncLoader) {
         this(loadingCache, asyncLoader, createDefaultExecutor());
     }
 
@@ -55,7 +55,7 @@ public class AsyncLoadingCacheImpl<K, V> extends AsyncCacheImpl<K, V> implements
      * @param asyncLoader the async loader for computing values
      * @param executor the executor to use for async operations
      */
-    public AsyncLoadingCacheImpl(LoadingCache<K, V> loadingCache, AsyncCacheLoader<K, V> asyncLoader,
+    public AsyncLoadingCacheImpl(LoadingCache<K, V> loadingCache, AsyncCacheLoader<? super K, V> asyncLoader,
                                   Executor executor) {
         super(loadingCache, executor);
         this.loadingCache = Objects.requireNonNull(loadingCache, "loadingCache cannot be null");
@@ -176,7 +176,7 @@ public class AsyncLoadingCacheImpl<K, V> extends AsyncCacheImpl<K, V> implements
      * @param <V> the type of values
      * @return a synchronous cache loader
      */
-    public static <K, V> CacheLoader<K, V> toSyncLoader(AsyncCacheLoader<K, V> asyncLoader, Executor executor) {
+    public static <K, V> CacheLoader<K, V> toSyncLoader(AsyncCacheLoader<? super K, V> asyncLoader, Executor executor) {
         return new CacheLoader<K, V>() {
             @Override
             public V load(K key) throws Exception {
@@ -184,11 +184,13 @@ public class AsyncLoadingCacheImpl<K, V> extends AsyncCacheImpl<K, V> implements
             }
 
             @Override
+            @SuppressWarnings("unchecked")
             public Map<K, V> loadAll(Iterable<? extends K> keys) throws Exception {
-                return asyncLoader.asyncLoadAll(keys, executor).join();
+                // Safe cast: asyncLoader returns Map<? super K, V> but we know the actual keys are K
+                return (Map<K, V>) asyncLoader.asyncLoadAll(keys, executor).join();
             }
 
-            @Override
+            // Note: reload() is not in the CacheLoader interface, but is used internally
             public V reload(K key, V oldValue) throws Exception {
                 return asyncLoader.asyncReload(key, oldValue, executor).join();
             }

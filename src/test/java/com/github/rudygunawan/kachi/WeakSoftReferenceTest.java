@@ -45,7 +45,7 @@ class WeakSoftReferenceTest {
 
     @Test
     void testWeakValuesConfiguration() {
-        CacheBuilder<String, String> builder = CacheBuilder.newBuilder()
+        var builder = CacheBuilder.newBuilder()
                 .weakValues();
 
         assertEquals(Strength.WEAK, builder.getValueStrength());
@@ -54,7 +54,7 @@ class WeakSoftReferenceTest {
 
     @Test
     void testSoftValuesConfiguration() {
-        CacheBuilder<String, String> builder = CacheBuilder.newBuilder()
+        var builder = CacheBuilder.newBuilder()
                 .softValues();
 
         assertEquals(Strength.SOFT, builder.getValueStrength());
@@ -261,7 +261,7 @@ class WeakSoftReferenceTest {
         Cache<String, String> cache = CacheBuilder.newBuilder()
                 .build(); // No weak/soft specified
 
-        CacheBuilder<String, String> builder = CacheBuilder.newBuilder();
+        var builder = CacheBuilder.newBuilder();
         assertEquals(Strength.STRONG, builder.getValueStrength());
         assertEquals(Strength.STRONG, builder.getKeyStrength());
 
@@ -325,7 +325,7 @@ class WeakSoftReferenceTest {
 
     @Test
     void testWeakKeysConfiguration() {
-        CacheBuilder<String, String> builder = CacheBuilder.newBuilder()
+        var builder = CacheBuilder.newBuilder()
                 .weakKeys();
 
         assertEquals(Strength.WEAK, builder.getKeyStrength());
@@ -469,7 +469,7 @@ class WeakSoftReferenceTest {
         Cache<Object, String> cache = CacheBuilder.newBuilder()
                 .build(); // No weak keys specified
 
-        CacheBuilder<String, String> builder = CacheBuilder.newBuilder();
+        var builder = CacheBuilder.newBuilder();
         assertEquals(Strength.STRONG, builder.getKeyStrength());
 
         // Strong key references should never be GC'd while in cache

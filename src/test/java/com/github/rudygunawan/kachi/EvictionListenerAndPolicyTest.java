@@ -275,7 +275,7 @@ class EvictionListenerAndPolicyTest {
 
     @Test
     void testWeakKeysConfiguration() {
-        CacheBuilder<String, String> builder = CacheBuilder.newBuilder()
+        var builder = CacheBuilder.newBuilder()
                 .weakKeys();
 
         assertEquals(Strength.WEAK, builder.getKeyStrength());
@@ -284,7 +284,7 @@ class EvictionListenerAndPolicyTest {
 
     @Test
     void testWeakValuesConfiguration() {
-        CacheBuilder<String, String> builder = CacheBuilder.newBuilder()
+        var builder = CacheBuilder.newBuilder()
                 .weakValues();
 
         assertEquals(Strength.STRONG, builder.getKeyStrength()); // Default
@@ -293,7 +293,7 @@ class EvictionListenerAndPolicyTest {
 
     @Test
     void testSoftValuesConfiguration() {
-        CacheBuilder<String, String> builder = CacheBuilder.newBuilder()
+        var builder = CacheBuilder.newBuilder()
                 .softValues();
 
         assertEquals(Strength.STRONG, builder.getKeyStrength()); // Default
@@ -302,7 +302,7 @@ class EvictionListenerAndPolicyTest {
 
     @Test
     void testWeakKeysSoftValuesConfiguration() {
-        CacheBuilder<String, String> builder = CacheBuilder.newBuilder()
+        var builder = CacheBuilder.newBuilder()
                 .weakKeys()
                 .softValues();
 
@@ -312,7 +312,7 @@ class EvictionListenerAndPolicyTest {
 
     @Test
     void testReferenceStrengthDefaults() {
-        CacheBuilder<String, String> builder = CacheBuilder.newBuilder();
+        var builder = CacheBuilder.newBuilder();
 
         assertEquals(Strength.STRONG, builder.getKeyStrength());
         assertEquals(Strength.STRONG, builder.getValueStrength());
@@ -320,7 +320,7 @@ class EvictionListenerAndPolicyTest {
 
     @Test
     void testSoftValuesOverridesWeakValues() {
-        CacheBuilder<String, String> builder = CacheBuilder.newBuilder()
+        var builder = CacheBuilder.newBuilder()
                 .weakValues()
                 .softValues(); // Should override weak
 

@@ -185,8 +185,7 @@ class NewFeaturesTest {
             }
         };
 
-        ConcurrentCacheImpl<String, String> cache = (ConcurrentCacheImpl<String, String>)
-            CacheBuilder.newBuilder()
+        Cache<String, String> cache = CacheBuilder.<String, String>newBuilder()
                 .expireAfterWrite(100, TimeUnit.MILLISECONDS)
                 .removalListener(listener)
                 .build();
@@ -203,8 +202,6 @@ class NewFeaturesTest {
 
         assertEquals(3, expiredCount.get());
         assertEquals(0, cache.size());
-
-        cache.shutdown();
     }
 
     @Test

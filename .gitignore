@@ -12,6 +12,8 @@ buildNumber.properties
 
 # IDE
 .idea/
+apache-maven*/
+target/
 *.iml
 .vscode/
 .settings/

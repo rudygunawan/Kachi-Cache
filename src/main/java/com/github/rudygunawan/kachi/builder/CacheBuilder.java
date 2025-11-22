@@ -894,13 +894,13 @@ public class CacheBuilder<K, V> {
 
         // Create a synchronous loader that wraps the async loader
         java.util.concurrent.Executor executor = AsyncLoadingCacheImpl.createDefaultExecutor();
-        CacheLoader<K1, V1> syncLoader = AsyncLoadingCacheImpl.toSyncLoader(asyncLoader, executor);
+        CacheLoader<K1, V1> syncLoader = AsyncLoadingCacheImpl.<K1, V1>toSyncLoader(asyncLoader, executor);
 
         // Build the synchronous loading cache
         LoadingCache<K1, V1> syncCache = build(syncLoader);
 
         // Wrap in async loading cache
-        return new AsyncLoadingCacheImpl<>(syncCache, asyncLoader, executor);
+        return new AsyncLoadingCacheImpl<K1, V1>(syncCache, asyncLoader, executor);
     }
 
     // Package-private getters for ConcurrentCacheImpl

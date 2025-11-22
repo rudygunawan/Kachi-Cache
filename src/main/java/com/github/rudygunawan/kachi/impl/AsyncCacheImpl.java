@@ -7,6 +7,7 @@ import com.github.rudygunawan.kachi.model.CacheStats;
 import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.Executor;
 import java.util.function.Function;
@@ -133,8 +134,16 @@ public class AsyncCacheImpl<K, V> implements AsyncCache<K, V> {
     }
 
     @Override
+    @SuppressWarnings("unchecked")
     public ConcurrentMap<K, V> asMap() {
-        return cache.asMap();
+        Map<K, V> map = cache.asMap();
+        // Cache implementations return a snapshot map. We need to return it as ConcurrentMap
+        // for AsyncCache interface compatibility. This is safe as the underlying cache is thread-safe.
+        if (map instanceof ConcurrentMap) {
+            return (ConcurrentMap<K, V>) map;
+        }
+        // Fallback: wrap in ConcurrentHashMap
+        return new ConcurrentHashMap<>(map);
     }
 
     @Override

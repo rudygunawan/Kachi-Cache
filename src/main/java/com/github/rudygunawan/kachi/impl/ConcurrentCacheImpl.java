@@ -1037,4 +1037,175 @@ public class ConcurrentCacheImpl<K, V> implements LoadingCache<K, V>, CacheMetri
                 neverExpires
         );
     }
+
+    @Override
+    public V compute(K key, java.util.function.BiFunction<? super K, ? super V, ? extends V> remappingFunction) {
+        java.util.Objects.requireNonNull(key, "key cannot be null");
+        java.util.Objects.requireNonNull(remappingFunction, "remappingFunction cannot be null");
+
+        V oldValue = getIfPresent(key);
+        V newValue = remappingFunction.apply(key, oldValue);
+
+        if (newValue == null) {
+            if (oldValue != null) {
+                invalidate(key);
+            }
+            return null;
+        } else {
+            put(key, newValue);
+            return newValue;
+        }
+    }
+
+    @Override
+    public V computeIfAbsent(K key, java.util.function.Function<? super K, ? extends V> mappingFunction) {
+        java.util.Objects.requireNonNull(key, "key cannot be null");
+        java.util.Objects.requireNonNull(mappingFunction, "mappingFunction cannot be null");
+
+        V existingValue = getIfPresent(key);
+        if (existingValue != null) {
+            return existingValue;
+        }
+
+        V newValue = mappingFunction.apply(key);
+        if (newValue != null) {
+            put(key, newValue);
+            return newValue;
+        }
+        return null;
+    }
+
+    @Override
+    public V computeIfPresent(K key, java.util.function.BiFunction<? super K, ? super V, ? extends V> remappingFunction) {
+        java.util.Objects.requireNonNull(key, "key cannot be null");
+        java.util.Objects.requireNonNull(remappingFunction, "remappingFunction cannot be null");
+
+        V oldValue = getIfPresent(key);
+        if (oldValue == null) {
+            return null;
+        }
+
+        V newValue = remappingFunction.apply(key, oldValue);
+        if (newValue == null) {
+            invalidate(key);
+            return null;
+        } else {
+            put(key, newValue);
+            return newValue;
+        }
+    }
+
+    @Override
+    public V merge(K key, V value, java.util.function.BiFunction<? super V, ? super V, ? extends V> remappingFunction) {
+        java.util.Objects.requireNonNull(key, "key cannot be null");
+        java.util.Objects.requireNonNull(value, "value cannot be null");
+        java.util.Objects.requireNonNull(remappingFunction, "remappingFunction cannot be null");
+
+        V oldValue = getIfPresent(key);
+        V newValue = (oldValue == null) ? value : remappingFunction.apply(oldValue, value);
+
+        if (newValue == null) {
+            invalidate(key);
+            return null;
+        } else {
+            put(key, newValue);
+            return newValue;
+        }
+    }
+
+    @Override
+    public com.github.rudygunawan.kachi.policy.Policy<K, V> policy() {
+        return new com.github.rudygunawan.kachi.policy.Policy<K, V>() {
+            @Override
+            public Optional<com.github.rudygunawan.kachi.policy.Policy.Eviction<K, V>> eviction() {
+                if (maximumSize <= 0 && maximumWeight <= 0) {
+                    return Optional.empty();
+                }
+                return Optional.of(new com.github.rudygunawan.kachi.policy.Policy.Eviction<K, V>() {
+                    private volatile long mutableMaximumSize = maximumSize;
+                    private volatile long mutableMaximumWeight = maximumWeight;
+
+                    @Override
+                    public long getMaximum() {
+                        return (weigher == null) ? mutableMaximumSize : mutableMaximumWeight;
+                    }
+
+                    @Override
+                    public void setMaximum(long maximum) {
+                        if (maximum < 0) {
+                            throw new IllegalArgumentException("maximum cannot be negative");
+                        }
+                        if (weigher == null) {
+                            mutableMaximumSize = maximum;
+                        } else {
+                            mutableMaximumWeight = maximum;
+                        }
+                        cleanUp();
+                    }
+
+                    @Override
+                    public long weightedSize() {
+                        return (weigher == null) ? storage.size() : currentWeight.get();
+                    }
+
+                    @Override
+                    public boolean isWeighted() {
+                        return weigher != null;
+                    }
+
+                    @Override
+                    public EvictionPolicy getEvictionPolicy() {
+                        return evictionPolicy;
+                    }
+                });
+            }
+
+            @Override
+            public Optional<com.github.rudygunawan.kachi.policy.Policy.Expiration<K, V>> expiration() {
+                if (expireAfterWriteNanos <= 0 && expireAfterAccessNanos <= 0 && expiry == null) {
+                    return Optional.empty();
+                }
+                return Optional.of(new com.github.rudygunawan.kachi.policy.Policy.Expiration<K, V>() {
+                    private volatile long mutableExpireAfterWriteNanos = expireAfterWriteNanos;
+                    private volatile long mutableExpireAfterAccessNanos = expireAfterAccessNanos;
+
+                    @Override
+                    public long getExpiresAfterWrite() {
+                        return mutableExpireAfterWriteNanos;
+                    }
+
+                    @Override
+                    public void setExpiresAfterWrite(long durationNanos) {
+                        if (durationNanos < 0) {
+                            throw new IllegalArgumentException("duration cannot be negative");
+                        }
+                        mutableExpireAfterWriteNanos = durationNanos;
+                    }
+
+                    @Override
+                    public long getExpiresAfterAccess() {
+                        return mutableExpireAfterAccessNanos;
+                    }
+
+                    @Override
+                    public void setExpiresAfterAccess(long durationNanos) {
+                        if (durationNanos < 0) {
+                            throw new IllegalArgumentException("duration cannot be negative");
+                        }
+                        mutableExpireAfterAccessNanos = durationNanos;
+                    }
+
+                    @Override
+                    public long ageOf(K key) {
+                        CacheEntry<V> entry = storage.get(key);
+                        if (entry == null) {
+                            return -1;
+                        }
+                        long now = System.nanoTime();
+                        return now - entry.getWriteTime();
+                    }
+                });
+            }
+        };
+    }
 }

@@ -21,6 +21,7 @@ import com.github.rudygunawan.kachi.policy.RemovalCause;
 import com.github.rudygunawan.kachi.policy.Strength;
 import com.github.rudygunawan.kachi.reference.KeyReference;
 
+import java.lang.ref.ReferenceQueue;
 import java.util.*;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicLong;
